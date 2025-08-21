@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SIP Users</title>
+    <style>
+        body { font-family: sans-serif; margin: 2em; }
+        table { border-collapse: collapse; width: 100%; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+        th { background-color: #f2f2f2; }
+        a { text-decoration: none; color: #007bff; }
+        .add-link { display: inline-block; margin-bottom: 1em; }
+    </style>
+</head>
+<body>
+    <h1>SIP Server Users</h1>
+    <a href="/users/new" class="add-link">Add New User</a>
+    <table>
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Username</th>
+                <th>Password (HA1 Hash)</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{if .}}
+                {{range .}}
+                <tr>
+                    <td>{{.ID}}</td>
+                    <td>{{.Username}}</td>
+                    <td>{{.Password}}</td>
+                </tr>
+                {{end}}
+            {{else}}
+                <tr>
+                    <td colspan="3">No users found.</td>
+                </tr>
+            {{end}}
+        </tbody>
+    </table>
+</body>
+</html>

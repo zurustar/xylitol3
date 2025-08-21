@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Add New SIP User</title>
+    <style>
+        body { font-family: sans-serif; margin: 2em; }
+        form { display: flex; flex-direction: column; max-width: 300px; }
+        label { margin-bottom: 0.5em; }
+        input { padding: 8px; margin-bottom: 1em; border: 1px solid #ccc; border-radius: 4px; }
+        button { padding: 10px; background-color: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; }
+        .back-link { display: inline-block; margin-top: 1em; }
+    </style>
+</head>
+<body>
+    <h1>Add New SIP User</h1>
+    <form action="/users/new" method="post">
+        <label for="username">Username:</label>
+        <input type="text" id="username" name="username" required>
+
+        <label for="password">Password:</label>
+        <input type="password" id="password" name="password" required>
+
+        <label for="realm">Realm:</label>
+        <input type="text" id="realm" name="realm" required placeholder="e.g., example.com">
+
+        <button type="submit">Add User</button>
+    </form>
+    <a href="/users" class="back-link">Back to User List</a>
+</body>
+</html>
