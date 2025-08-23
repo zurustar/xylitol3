@@ -16,6 +16,19 @@ type SIPRequest struct {
 	Body          []byte
 }
 
+// String returns the string representation of the SIP request.
+func (r *SIPRequest) String() string {
+	var builder strings.Builder
+	builder.WriteString(fmt.Sprintf("%s %s %s\r\n", r.Method, r.URI, r.Proto))
+	for key, value := range r.Headers {
+		builder.WriteString(fmt.Sprintf("%s: %s\r\n", strings.Title(key), value))
+	}
+	builder.WriteString(fmt.Sprintf("Content-Length: %d\r\n", len(r.Body)))
+	builder.WriteString("\r\n")
+	builder.Write(r.Body)
+	return builder.String()
+}
+
 // SIPURI represents a parsed SIP URI.
 type SIPURI struct {
 	Scheme string // e.g., "sip"
@@ -76,6 +89,82 @@ func (r *SIPRequest) GetSIPURIHeader(name string) (*SIPURI, error) {
 	}
 
 	return ParseSIPURI(headerValue)
+}
+
+// Via represents a single Via header value.
+type Via struct {
+	Proto  string // e.g., "SIP/2.0/UDP"
+	Host   string
+	Port   string
+	Params map[string]string
+}
+
+// GetParam returns a parameter from the Via header, case-insensitively.
+func (v *Via) GetParam(name string) (string, bool) {
+	val, ok := v.Params[strings.ToLower(name)]
+	return val, ok
+}
+
+// Branch returns the branch parameter from the Via header.
+func (v *Via) Branch() string {
+	val, _ := v.GetParam("branch")
+	return val
+}
+
+// ParseVia parses a single Via header field value string.
+func ParseVia(viaValue string) (*Via, error) {
+	parts := strings.Split(viaValue, ";")
+	if len(parts) == 0 {
+		return nil, fmt.Errorf("empty via value")
+	}
+
+	// First part is proto and sent-by
+	sentByParts := strings.Fields(parts[0])
+	if len(sentByParts) != 2 {
+		return nil, fmt.Errorf("malformed sent-by in Via: %s", parts[0])
+	}
+
+	via := &Via{
+		Proto:  sentByParts[0],
+		Params: make(map[string]string),
+	}
+
+	hostPort := strings.SplitN(sentByParts[1], ":", 2)
+	via.Host = hostPort[0]
+	if len(hostPort) == 2 {
+		via.Port = hostPort[1]
+	}
+
+	// Subsequent parts are params
+	for _, param := range parts[1:] {
+		kv := strings.SplitN(param, "=", 2)
+		key := strings.TrimSpace(kv[0])
+		var val string
+		if len(kv) == 2 {
+			val = strings.TrimSpace(kv[1])
+		}
+		via.Params[strings.ToLower(key)] = val
+	}
+
+	return via, nil
+}
+
+// TopVia parses and returns the top-most Via header.
+func (r *SIPRequest) TopVia() (*Via, error) {
+	viaHeader := r.GetHeader("Via")
+	if viaHeader == "" {
+		return nil, fmt.Errorf("no Via header found")
+	}
+
+	// A request might have multiple Via headers, represented as a comma-separated list
+	// in a single header line. The top-most one is the first one.
+	topViaValue := viaHeader
+	if idx := strings.Index(viaHeader, ","); idx != -1 {
+		// This is a naive split. A proper parser would handle quoted commas.
+		topViaValue = strings.TrimSpace(viaHeader[:idx])
+	}
+
+	return ParseVia(topViaValue)
 }
 
 // ParseSIPRequest parses a raw SIP request from a string.

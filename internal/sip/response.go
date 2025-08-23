@@ -5,16 +5,41 @@ import (
 	"strings"
 )
 
-// BuildResponse constructs a SIP response string.
-// It copies necessary headers from the original request and allows adding new ones.
-func BuildResponse(statusCode int, statusText string, req *SIPRequest, extraHeaders map[string]string) string {
-	var builder strings.Builder
+// SIPResponse represents a SIP response message.
+type SIPResponse struct {
+	Proto      string
+	StatusCode int
+	Reason     string
+	Headers    map[string]string
+	Body       []byte
+}
 
-	// Status-Line
-	builder.WriteString(fmt.Sprintf("%s %d %s\r\n", req.Proto, statusCode, statusText))
+// String returns the string representation of the SIP response.
+func (r *SIPResponse) String() string {
+	var builder strings.Builder
+	builder.WriteString(fmt.Sprintf("%s %d %s\r\n", r.Proto, r.StatusCode, r.Reason))
+	for key, value := range r.Headers {
+		// Canonicalize header names for consistency
+		builder.WriteString(fmt.Sprintf("%s: %s\r\n", strings.Title(key), value))
+	}
+	builder.WriteString(fmt.Sprintf("Content-Length: %d\r\n", len(r.Body)))
+	builder.WriteString("\r\n")
+	builder.Write(r.Body)
+	return builder.String()
+}
+
+// BuildResponse constructs a SIP response object.
+// It copies necessary headers from the original request and allows adding new ones.
+func BuildResponse(statusCode int, statusText string, req *SIPRequest, extraHeaders map[string]string) *SIPResponse {
+	resp := &SIPResponse{
+		Proto:      req.Proto,
+		StatusCode: statusCode,
+		Reason:     statusText,
+		Headers:    make(map[string]string),
+		Body:       []byte{},
+	}
 
 	// Copy essential headers from the request.
-	// These headers are canonicalized to Title-Case by the parser.
 	headersToCopy := []string{"Via", "From", "To", "Call-Id", "Cseq"}
 	for _, h := range headersToCopy {
 		if val := req.GetHeader(h); val != "" {
@@ -25,20 +50,14 @@ func BuildResponse(statusCode int, statusText string, req *SIPRequest, extraHead
 				// would generate a unique tag for the dialog.
 				val = fmt.Sprintf("%s;tag=z9hG4bK-response-tag", val)
 			}
-			builder.WriteString(fmt.Sprintf("%s: %s\r\n", h, val))
+			resp.Headers[h] = val
 		}
 	}
 
 	// Add any extra headers provided by the caller (e.g., WWW-Authenticate, Contact, Allow).
 	for key, val := range extraHeaders {
-		builder.WriteString(fmt.Sprintf("%s: %s\r\n", key, val))
+		resp.Headers[key] = val
 	}
 
-	// Add Content-Length (assuming no body for now).
-	builder.WriteString("Content-Length: 0\r\n")
-
-	// Final CRLF to terminate the header section.
-	builder.WriteString("\r\n")
-
-	return builder.String()
+	return resp
 }
