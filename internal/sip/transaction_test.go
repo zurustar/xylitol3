@@ -3,52 +3,9 @@ package sip
 import (
 	"net"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 )
-
-// mockPacketConn is a mock implementation of net.PacketConn for testing.
-type mockPacketConn struct {
-	mu      sync.Mutex
-	written chan []byte
-}
-
-func newMockPacketConn() *mockPacketConn {
-	return &mockPacketConn{
-		written: make(chan []byte, 10), // Buffer to avoid blocking
-	}
-}
-
-func (c *mockPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
-	return 0, nil, nil
-}
-
-func (c *mockPacketConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	select {
-	case c.written <- p:
-	default:
-		// Don't block if buffer is full
-	}
-	return len(p), nil
-}
-
-func (c *mockPacketConn) Close() error { return nil }
-func (c *mockPacketConn) LocalAddr() net.Addr { return nil }
-func (c *mockPacketConn) SetDeadline(t time.Time) error { return nil }
-func (c *mockPacketConn) SetReadDeadline(t time.Time) error { return nil }
-func (c *mockPacketConn) SetWriteDeadline(t time.Time) error { return nil }
-
-func (c *mockPacketConn) getLastWritten(timeout time.Duration) (string, bool) {
-	select {
-	case data := <-c.written:
-		return string(data), true
-	case <-time.After(timeout):
-		return "", false
-	}
-}
 
 // TestNonInviteServerTransactionHappyPath tests the basic trying -> completed flow.
 func TestNonInviteServerTransactionHappyPath(t *testing.T) {
@@ -71,7 +28,7 @@ func TestNonInviteServerTransactionHappyPath(t *testing.T) {
 	transport := newMockPacketConn()
 	remoteAddr := &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 5060}
 
-	tx, err := NewNonInviteServerTx(req, transport, remoteAddr)
+	tx, err := NewNonInviteServerTx(req, transport, remoteAddr, "UDP")
 	if err != nil {
 		t.Fatalf("Failed to create transaction: %v", err)
 	}
@@ -129,7 +86,7 @@ func TestInviteServerTransactionAckFlow(t *testing.T) {
 	remoteAddr := &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 5060}
 
 	// Create transaction
-	tx, err := NewInviteServerTx(req, transport, remoteAddr)
+	tx, err := NewInviteServerTx(req, transport, remoteAddr, "UDP")
 	if err != nil {
 		t.Fatalf("Failed to create transaction: %v", err)
 	}
@@ -181,5 +138,91 @@ func TestInviteServerTransactionAckFlow(t *testing.T) {
 		// Success
 	case <-time.After(200 * time.Millisecond): // T4 is 100ms, so 200ms should be enough
 		t.Fatal("Transaction did not terminate after Timer I")
+	}
+}
+
+// TestNonInviteServerTransactionTCP tests that the transaction terminates immediately for TCP.
+func TestNonInviteServerTransactionTCP(t *testing.T) {
+	reqStr := "REGISTER sip:test SIP/2.0\r\n" +
+		"Via: SIP/2.0/TCP 1.1.1.1:5060;branch=z9hG4bK-tcp-1\r\n" +
+		"To: a\r\n" +
+		"From: b\r\n" +
+		"CSeq: 1 REGISTER\r\n" +
+		"Call-ID: 3\r\n" +
+		"Content-Length: 0\r\n\r\n"
+	req, err := ParseSIPRequest(reqStr)
+	if err != nil {
+		t.Fatalf("Failed to parse request: %v", err)
+	}
+
+	transport := newMockPacketConn()
+	remoteAddr := &net.TCPAddr{IP: net.ParseIP("1.1.1.1"), Port: 5060}
+
+	tx, err := NewNonInviteServerTx(req, transport, remoteAddr, "TCP")
+	if err != nil {
+		t.Fatalf("Failed to create transaction: %v", err)
+	}
+
+	tuReq := <-tx.Requests()
+	res := BuildResponse(200, "OK", tuReq, nil)
+	err = tx.Respond(res)
+	if err != nil {
+		t.Fatalf("TU failed to send response: %v", err)
+	}
+
+	// For TCP, transaction should terminate almost immediately.
+	select {
+	case <-tx.Done():
+		// Success
+	case <-time.After(50 * time.Millisecond):
+		t.Fatal("Transaction did not terminate immediately for TCP")
+	}
+}
+
+// TestInviteServerTransactionNoRetransmissionTCP tests that final responses are not retransmitted for TCP.
+func TestInviteServerTransactionNoRetransmissionTCP(t *testing.T) {
+	T1 = 50 * time.Millisecond // Make timer G interval short if it were to run
+
+	reqStr := "INVITE sip:test SIP/2.0\r\n" +
+		"Via: SIP/2.0/TCP 1.1.1.1:5060;branch=z9hG4bK-tcp-2\r\n" +
+		"To: a\r\n" +
+		"From: b\r\n" +
+		"CSeq: 1 INVITE\r\n" +
+		"Call-ID: 4\r\n" +
+		"Content-Length: 0\r\n\r\n"
+	req, err := ParseSIPRequest(reqStr)
+	if err != nil {
+		t.Fatalf("Failed to parse request: %v", err)
+	}
+
+	transport := newMockPacketConn()
+	remoteAddr := &net.TCPAddr{IP: net.ParseIP("1.1.1.1"), Port: 5060}
+
+	tx, err := NewInviteServerTx(req, transport, remoteAddr, "TCP")
+	if err != nil {
+		t.Fatalf("Failed to create transaction: %v", err)
+	}
+	<-tx.Requests() // Consume request
+
+	// It should have sent 100 Trying
+	transport.getLastWritten(100 * time.Millisecond)
+
+	// TU sends a final non-2xx response
+	res := BuildResponse(503, "Service Unavailable", req, nil)
+	err = tx.Respond(res)
+	if err != nil {
+		t.Fatalf("TU failed to send response: %v", err)
+	}
+
+	// Check that the 503 was sent once
+	sentData, ok := transport.getLastWritten(100 * time.Millisecond)
+	if !ok || !strings.Contains(sentData, "503 Service Unavailable") {
+		t.Fatal("Transport did not write the initial 503 response")
+	}
+
+	// Now check that it is NOT retransmitted
+	sentData, ok = transport.getLastWritten(100 * time.Millisecond) // T1*2 would be 100ms
+	if ok {
+		t.Fatalf("Transport retransmitted response over TCP: %s", sentData)
 	}
 }

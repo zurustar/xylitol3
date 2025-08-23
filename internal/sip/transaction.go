@@ -41,6 +41,13 @@ func GenerateBranchID() string {
 	return fmt.Sprintf("%s%s", RFC3261BranchMagicCookie, hex.EncodeToString(b))
 }
 
+// GenerateNonce generates a random hex string of length 2*n.
+func GenerateNonce(n int) string {
+	b := make([]byte, n)
+	rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
 // --- Transaction Interfaces ---
 
 // BaseTransaction is the base interface for all transactions.
@@ -123,10 +130,11 @@ type NonInviteServerTx struct {
 	requests     chan *SIPRequest
 	transport    net.PacketConn
 	destAddr     net.Addr
+	proto        string
 }
 
 // NewNonInviteServerTx creates and starts a new non-INVITE server transaction.
-func NewNonInviteServerTx(req *SIPRequest, transport net.PacketConn, remoteAddr net.Addr) (ServerTransaction, error) {
+func NewNonInviteServerTx(req *SIPRequest, transport net.PacketConn, remoteAddr net.Addr, proto string) (ServerTransaction, error) {
 	topVia, err := req.TopVia()
 	if err != nil {
 		return nil, err
@@ -145,6 +153,7 @@ func NewNonInviteServerTx(req *SIPRequest, transport net.PacketConn, remoteAddr 
 		requests:    make(chan *SIPRequest, 1),
 		transport:   transport,
 		destAddr:    remoteAddr,
+		proto:       proto,
 	}
 
 	go tx.run()
@@ -221,6 +230,12 @@ func (tx *NonInviteServerTx) run() {
 			tx.send(res)
 			if res.StatusCode >= 200 {
 				tx.state = TxStateCompleted
+				// For reliable transports, terminate immediately. For unreliable, start Timer J.
+				if strings.ToUpper(tx.proto) == "TCP" {
+					tx.mu.Unlock() // Unlock before calling Terminate
+					tx.Terminate()
+					return // End the goroutine
+				}
 				tx.timerJ = time.AfterFunc(64*T1, tx.Terminate)
 			} else {
 				tx.state = TxStateProceeding
@@ -256,10 +271,11 @@ type InviteServerTx struct {
 	requests     chan *SIPRequest
 	transport    net.PacketConn
 	destAddr     net.Addr
+	proto        string
 }
 
 // NewInviteServerTx creates and starts a new INVITE server transaction.
-func NewInviteServerTx(req *SIPRequest, transport net.PacketConn, remoteAddr net.Addr) (ServerTransaction, error) {
+func NewInviteServerTx(req *SIPRequest, transport net.PacketConn, remoteAddr net.Addr, proto string) (ServerTransaction, error) {
 	topVia, err := req.TopVia()
 	if err != nil {
 		return nil, err
@@ -277,6 +293,7 @@ func NewInviteServerTx(req *SIPRequest, transport net.PacketConn, remoteAddr net
 		requests:    make(chan *SIPRequest, 1),
 		transport:   transport,
 		destAddr:    remoteAddr,
+		proto:       proto,
 	}
 	tryingRes := BuildResponse(100, "Trying", req, nil)
 	tx.send(tryingRes)
@@ -369,6 +386,9 @@ func (tx *InviteServerTx) run() {
 }
 
 func (tx *InviteServerTx) startTimerG() {
+	if strings.ToUpper(tx.proto) == "TCP" {
+		return // Do not retransmit responses over reliable transport
+	}
 	interval := T1
 	tx.timerG = time.AfterFunc(interval, func() {
 		tx.mu.Lock()
@@ -406,9 +426,10 @@ type NonInviteClientTx struct {
 	responses chan *SIPResponse
 	transport net.PacketConn
 	destAddr  net.Addr
+	proto     string
 }
 
-func NewNonInviteClientTx(req *SIPRequest, transport net.PacketConn, dest net.Addr) (ClientTransaction, error) {
+func NewNonInviteClientTx(req *SIPRequest, transport net.PacketConn, dest net.Addr, proto string) (ClientTransaction, error) {
 	topVia, err := req.TopVia()
 	if err != nil {
 		return nil, err
@@ -421,6 +442,7 @@ func NewNonInviteClientTx(req *SIPRequest, transport net.PacketConn, dest net.Ad
 		responses: make(chan *SIPResponse, 1),
 		transport: transport,
 		destAddr:  dest,
+		proto:     proto,
 	}
 	go tx.run()
 	return tx, nil
@@ -482,6 +504,9 @@ func (tx *NonInviteClientTx) run() {
 }
 
 func (tx *NonInviteClientTx) startTimerE(interval time.Duration) {
+	if strings.ToUpper(tx.proto) == "TCP" {
+		return // Do not retransmit requests over reliable transport
+	}
 	tx.timerE = time.AfterFunc(interval, func() {
 		tx.mu.Lock()
 		defer tx.mu.Unlock()
@@ -520,9 +545,10 @@ type InviteClientTx struct {
 	responses chan *SIPResponse
 	transport net.PacketConn
 	destAddr  net.Addr
+	proto     string
 }
 
-func NewInviteClientTx(req *SIPRequest, transport net.PacketConn, dest net.Addr) (ClientTransaction, error) {
+func NewInviteClientTx(req *SIPRequest, transport net.PacketConn, dest net.Addr, proto string) (ClientTransaction, error) {
 	topVia, err := req.TopVia()
 	if err != nil {
 		return nil, err
@@ -535,6 +561,7 @@ func NewInviteClientTx(req *SIPRequest, transport net.PacketConn, dest net.Addr)
 		responses: make(chan *SIPResponse, 1),
 		transport: transport,
 		destAddr:  dest,
+		proto:     proto,
 	}
 	go tx.run()
 	return tx, nil
@@ -591,7 +618,12 @@ func (tx *InviteClientTx) ReceiveResponse(res *SIPResponse) {
 			tx.state = TxStateCompleted
 			sendResponseToTU(res)
 			tx.sendAck(res)
-			tx.timerD = time.AfterFunc(32*time.Second, tx.Terminate)
+			// Timer D value depends on transport. For reliable transport, it's 0.
+			timerDVal := 32 * time.Second
+			if strings.ToUpper(tx.proto) == "TCP" {
+				timerDVal = 0
+			}
+			tx.timerD = time.AfterFunc(timerDVal, tx.Terminate)
 		} else if tx.state == TxStateCompleted {
 			tx.sendAck(res)
 		}
@@ -619,6 +651,9 @@ func (tx *InviteClientTx) run() {
 }
 
 func (tx *InviteClientTx) startTimerA(interval time.Duration) {
+	if strings.ToUpper(tx.proto) == "TCP" {
+		return // Do not retransmit INVITE over reliable transport
+	}
 	tx.timerA = time.AfterFunc(interval, func() {
 		tx.mu.Lock()
 		defer tx.mu.Unlock()
