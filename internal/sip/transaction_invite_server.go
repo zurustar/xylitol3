@@ -67,6 +67,7 @@ func NewInviteServerTx(req *SIPRequest, transport net.PacketConn, remoteAddr net
 func (tx *InviteServerTx) ID() string { return tx.id }
 func (tx *InviteServerTx) Done() <-chan bool { return tx.done }
 func (tx *InviteServerTx) Requests() <-chan *SIPRequest { return tx.requests }
+func (tx *InviteServerTx) OriginalRequest() *SIPRequest { return tx.originalReq }
 
 func (tx *InviteServerTx) Terminate() {
 	tx.mu.Lock()

@@ -112,6 +112,10 @@ func (tx *NonInviteServerTx) Requests() <-chan *SIPRequest {
 	return tx.requests
 }
 
+func (tx *NonInviteServerTx) OriginalRequest() *SIPRequest {
+	return tx.originalReq
+}
+
 func (tx *NonInviteServerTx) run() {
 	defer tx.Terminate()
 	for {

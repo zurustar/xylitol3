@@ -59,6 +59,7 @@ type ServerTransaction interface {
 	Receive(*SIPRequest)
 	Respond(*SIPResponse) error
 	Requests() <-chan *SIPRequest
+	OriginalRequest() *SIPRequest
 }
 
 // ClientTransaction represents a client-side transaction.
@@ -66,6 +67,7 @@ type ClientTransaction interface {
 	BaseTransaction
 	Responses() <-chan *SIPResponse
 	ReceiveResponse(*SIPResponse)
+	OriginalRequest() *SIPRequest
 }
 
 // --- Transaction Manager ---
