@@ -34,8 +34,13 @@ func main() {
 	defer s.Close()
 	log.Printf("Storage initialized with database file: %s", *dbPath)
 
-	// Create servers
-	webServer := web.NewServer(s)
+	// Create web server
+	webServer, err := web.NewServer(s, *realm)
+	if err != nil {
+		log.Fatalf("Failed to create web server: %v", err)
+	}
+
+	// Create SIP server
 	sipServer := sip.NewServer(s, *realm)
 
 	// --- Server Execution ---

@@ -27,6 +27,9 @@ go.work.sum
 # env file
 .env
 
+# Build outputs
+sip-server
+
 # Editor/IDE
 # .idea/
 # .vscode/
