@@ -2,6 +2,7 @@ package sip
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -26,6 +27,42 @@ func (r *SIPResponse) String() string {
 	builder.WriteString("\r\n")
 	builder.Write(r.Body)
 	return builder.String()
+}
+
+// GetHeader returns the value of a header. It expects the name to be in canonical form.
+func (r *SIPResponse) GetHeader(name string) string {
+	return r.Headers[strings.Title(name)]
+}
+
+// TopVia parses and returns the top-most Via header from the response.
+func (r *SIPResponse) TopVia() (*Via, error) {
+	viaHeader := r.GetHeader("Via")
+	if viaHeader == "" {
+		return nil, fmt.Errorf("no Via header found in response")
+	}
+
+	topViaValue := viaHeader
+	if idx := strings.Index(viaHeader, ","); idx != -1 {
+		topViaValue = strings.TrimSpace(viaHeader[:idx])
+	}
+
+	return ParseVia(topViaValue)
+}
+
+// PopVia removes the top-most Via header from the response.
+func (r *SIPResponse) PopVia() {
+	viaHeader := r.GetHeader("Via")
+	if viaHeader == "" {
+		return
+	}
+
+	if idx := strings.Index(viaHeader, ","); idx != -1 {
+		// There are more Via headers, so we set the header to the rest of the list.
+		r.Headers["Via"] = strings.TrimSpace(viaHeader[idx+1:])
+	} else {
+		// This was the only Via header, so we remove the header entirely.
+		delete(r.Headers, "Via")
+	}
 }
 
 // BuildResponse constructs a SIP response object.
@@ -56,7 +93,7 @@ func BuildResponse(statusCode int, statusText string, req *SIPRequest, extraHead
 
 	// Add any extra headers provided by the caller (e.g., WWW-Authenticate, Contact, Allow).
 	for key, val := range extraHeaders {
-		resp.Headers[key] = val
+		resp.Headers[strings.Title(key)] = val
 	}
 
 	return resp
@@ -91,4 +128,67 @@ func BuildAck(res *SIPResponse, originalReq *SIPRequest) *SIPRequest {
 	}
 
 	return ack
+}
+
+// ParseSIPResponse parses a raw string into a SIPResponse struct.
+func ParseSIPResponse(raw string) (*SIPResponse, error) {
+	lines := strings.Split(raw, "\r\n")
+	if len(lines) < 1 {
+		return nil, fmt.Errorf("empty response")
+	}
+
+	respLine := strings.SplitN(lines[0], " ", 3)
+	if len(respLine) < 2 { // Reason phrase can be empty
+		return nil, fmt.Errorf("invalid response line: %s", lines[0])
+	}
+
+	statusCode, err := strconv.Atoi(respLine[1])
+	if err != nil {
+		return nil, fmt.Errorf("invalid status code '%s' in response line", respLine[1])
+	}
+
+	var reason string
+	if len(respLine) > 2 {
+		reason = respLine[2]
+	}
+
+	res := &SIPResponse{
+		Proto:      respLine[0],
+		StatusCode: statusCode,
+		Reason:     reason,
+		Headers:    make(map[string]string),
+	}
+
+	// Find the end of headers (blank line)
+	headerEndIndex := len(lines)
+	bodyIndex := -1
+	for i, line := range lines[1:] {
+		if line == "" {
+			headerEndIndex = i + 1
+			bodyIndex = strings.Index(raw, "\r\n\r\n")
+			break
+		}
+	}
+
+	// Parse headers
+	for _, line := range lines[1:headerEndIndex] {
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) != 2 {
+			continue // Malformed header
+		}
+		key := strings.TrimSpace(parts[0])
+		value := strings.TrimSpace(parts[1])
+		res.Headers[strings.Title(key)] = value
+	}
+
+	// Get body if Content-Length indicates it
+	if contentLengthStr := res.GetHeader("Content-Length"); contentLengthStr != "" {
+		if contentLength, err := strconv.Atoi(contentLengthStr); err == nil && contentLength > 0 {
+			if bodyIndex != -1 && len(raw) >= bodyIndex+4 {
+				res.Body = []byte(raw[bodyIndex+4:])
+			}
+		}
+	}
+
+	return res, nil
 }
