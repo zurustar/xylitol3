@@ -23,6 +23,7 @@ type Registration struct {
 // Server holds the dependencies for the SIP server.
 type Server struct {
 	storage       *storage.Storage
+	txManager     *TransactionManager
 	registrations map[string]Registration
 	regMutex      sync.RWMutex
 	nonces        map[string]time.Time
@@ -35,6 +36,7 @@ type Server struct {
 func NewServer(s *storage.Storage, realm string) *Server {
 	return &Server{
 		storage:       s,
+		txManager:     NewTransactionManager(),
 		registrations: make(map[string]Registration),
 		nonces:        make(map[string]time.Time),
 		realm:         realm,
@@ -69,48 +71,138 @@ func (s *Server) Run(ctx context.Context, addr string) error {
 		}
 
 		message := string(buf[:n])
-		go func(msg string, from net.Addr) {
-			response, destAddr, err := s.handleMessage(msg, from)
-			if err != nil {
-				log.Printf("Error handling message: %v", err)
-				return
-			}
-			if response != "" && destAddr != nil {
-				if _, err := pc.WriteTo([]byte(response), destAddr); err != nil {
-					log.Printf("Error sending response to %s: %v", destAddr, err)
-				}
-			}
-		}(message, clientAddr)
+		go s.handleRequest(pc, message, clientAddr)
 	}
 }
 
-// handleMessage is the main router for incoming SIP messages.
-func (s *Server) handleMessage(rawMsg string, clientAddr net.Addr) (string, net.Addr, error) {
+// handleRequest is the new entry point for all incoming SIP requests.
+// It manages transactions and dispatches requests to the appropriate handlers.
+func (s *Server) handleRequest(pc net.PacketConn, rawMsg string, remoteAddr net.Addr) {
 	req, err := ParseSIPRequest(rawMsg)
 	if err != nil {
-		return "", nil, fmt.Errorf("error parsing SIP request: %v", err)
+		log.Printf("Error parsing SIP request: %v", err)
+		// Cannot send a response if parsing fails completely.
+		return
 	}
 
-	if req.Method == "REGISTER" {
-		response := s.handleRegister(req)
-		return response, clientAddr, nil
+	topVia, err := req.TopVia()
+	if err != nil {
+		log.Printf("Could not get Via header: %v", err)
+		// Maybe send a 400 Bad Request? For now, just log.
+		return
+	}
+	branchID := topVia.Branch()
+
+	// RFC 3261 compliant transaction ID must start with magic cookie.
+	if !strings.HasPrefix(branchID, RFC3261BranchMagicCookie) {
+		log.Printf("Received request with non-RFC3261 branch ID: %s. Handling statelessly.", branchID)
+		s.handleStateless(pc, req, remoteAddr)
+		return
 	}
 
-	return s.handleProxy(req, clientAddr)
+	// Look for an existing transaction.
+	if tx, ok := s.txManager.Get(branchID); ok {
+		log.Printf("Retransmission received for transaction %s", branchID)
+		if srvTx, ok := tx.(ServerTransaction); ok {
+			srvTx.Receive(req)
+		} else if clientTx, ok := tx.(ClientTransaction); ok {
+			// This case is for when a proxy receives a response.
+			// The response needs to be parsed and passed to the client transaction.
+			// This logic will be built out later.
+			log.Printf("Received message for client transaction %s, but response handling not implemented yet.", clientTx.ID())
+		}
+		return
+	}
+
+	// No existing transaction, create a new one.
+	log.Printf("New request received, creating transaction %s for method %s", branchID, req.Method)
+	var tx ServerTransaction
+	switch req.Method {
+	case "REGISTER":
+		tx, err = NewNonInviteServerTx(req, pc, remoteAddr)
+	case "INVITE":
+		tx, err = NewInviteServerTx(req, pc, remoteAddr)
+	default:
+		// For other methods like ACK, CANCEL, BYE, or proxying, handle statelessly for now.
+		log.Printf("Handling method %s statelessly.", req.Method)
+		s.handleStateless(pc, req, remoteAddr)
+		return
+	}
+
+	if err != nil {
+		log.Printf("Error creating transaction: %v", err)
+		return
+	}
+	s.txManager.Add(tx)
+
+	// This goroutine is the Transaction User (TU)
+	go s.handleTransaction(tx)
+}
+
+func (s *Server) handleTransaction(tx ServerTransaction) {
+	select {
+	case tuReq := <-tx.Requests():
+		var response *SIPResponse
+		// Dispatch to the correct handler based on method
+		switch tuReq.Method {
+		case "REGISTER":
+			response = s.handleRegister(tuReq)
+		case "INVITE":
+			// The current proxy logic is stateless. We'll need a stateful proxy handler.
+			// For now, let's just respond with a 501 Not Implemented for INVITEs
+			// that reach the server transaction layer, as the proxy logic isn't stateful yet.
+			response = BuildResponse(501, "Not Implemented", tuReq, nil)
+		default:
+			response = BuildResponse(405, "Method Not Allowed", tuReq, nil)
+		}
+
+		if err := tx.Respond(response); err != nil {
+			log.Printf("Error sending response to transaction %s: %v", tx.ID(), err)
+		}
+	case <-tx.Done():
+		// Transaction terminated before we could process it.
+	}
+}
+
+
+func (s *Server) handleStateless(pc net.PacketConn, req *SIPRequest, remoteAddr net.Addr) {
+	// Statelessly forward proxyable requests, respond to others.
+	if req.Method == "INVITE" || req.Method == "BYE" { // Add other proxy methods here
+		fwdMsg, destAddr, err := s.handleProxy(req, remoteAddr)
+		if err != nil {
+			log.Printf("Error handling stateless proxy message: %v", err)
+			// Send a 500 error back if proxying fails
+			errResp := BuildResponse(500, "Proxying Error", req, nil)
+			if _, writeErr := pc.WriteTo([]byte(errResp.String()), remoteAddr); writeErr != nil {
+				log.Printf("Error sending error response: %v", writeErr)
+			}
+			return
+		}
+		if fwdMsg != "" && destAddr != nil {
+			if _, err := pc.WriteTo([]byte(fwdMsg), destAddr); err != nil {
+				log.Printf("Error sending forwarded message to %s: %v", destAddr, err)
+			}
+		}
+	} else {
+		// For non-proxyable methods, we'd need a handler. For now, 405.
+		response := BuildResponse(405, "Method Not Allowed", req, nil)
+		if _, err := pc.WriteTo([]byte(response.String()), remoteAddr); err != nil {
+			log.Printf("Error sending 405 response: %v", err)
+		}
+	}
 }
 
 // handleProxy forwards a SIP request to a registered user.
+// NOTE: This is currently stateless and will be refactored to use a client transaction.
 func (s *Server) handleProxy(req *SIPRequest, clientAddr net.Addr) (string, net.Addr, error) {
 	toURI, err := req.GetSIPURIHeader("To")
 	if err != nil {
-		resp := BuildResponse(400, "Bad Request", req, map[string]string{"Warning": "Malformed To header"})
-		return resp, clientAddr, err
+		return "", nil, fmt.Errorf("malformed To header")
 	}
 
 	if toURI.Host != s.realm {
 		log.Printf("Proxy received request for unknown realm: %s", toURI.Host)
-		resp := BuildResponse(404, "Not Found", req, nil)
-		return resp, clientAddr, nil
+		return "", nil, fmt.Errorf("unknown realm")
 	}
 
 	s.regMutex.RLock()
@@ -120,13 +212,12 @@ func (s *Server) handleProxy(req *SIPRequest, clientAddr net.Addr) (string, net.
 	if !ok {
 		log.Printf("Proxy lookup failed for user '%s': not registered", toURI.User)
 		response := BuildResponse(480, "Temporarily Unavailable", req, nil)
-		return response, clientAddr, nil
+		return response.String(), clientAddr, nil // Return response string and no error
 	}
 
 	contactURI, err := ParseSIPURI(registration.ContactURI)
 	if err != nil {
-		log.Printf("Error parsing stored Contact URI '%s' for user '%s': %v", registration.ContactURI, toURI.User, err)
-		return BuildResponse(500, "Server Internal Error", req, nil), clientAddr, err
+		return "", nil, fmt.Errorf("error parsing stored Contact URI for user '%s': %v", toURI.User, err)
 	}
 
 	maxForwards := 70
@@ -136,11 +227,12 @@ func (s *Server) handleProxy(req *SIPRequest, clientAddr net.Addr) (string, net.
 		}
 	}
 	if maxForwards <= 1 {
-		return BuildResponse(483, "Too Many Hops", req, nil), clientAddr, nil
+		response := BuildResponse(483, "Too Many Hops", req, nil)
+		return response.String(), clientAddr, nil
 	}
 	req.Headers["Max-Forwards"] = strconv.Itoa(maxForwards - 1)
 
-	branch := "z9hG4bK-" + GenerateNonce(8)
+	branch := GenerateBranchID()
 	via := fmt.Sprintf("SIP/2.0/UDP %s;branch=%s", s.listenAddr, branch)
 	if existingVia := req.GetHeader("Via"); existingVia != "" {
 		req.Headers["Via"] = via + "," + existingVia
@@ -164,8 +256,7 @@ func (s *Server) handleProxy(req *SIPRequest, clientAddr net.Addr) (string, net.
 
 	destAddr, err := net.ResolveUDPAddr("udp", contactURI.Host+":"+destPort)
 	if err != nil {
-		log.Printf("Could not resolve Contact URI '%s' for user '%s': %v", registration.ContactURI, toURI.User, err)
-		return BuildResponse(500, "Server Internal Error", req, nil), clientAddr, err
+		return "", nil, fmt.Errorf("could not resolve Contact URI '%s' for user '%s': %v", registration.ContactURI, toURI.User, err)
 	}
 
 	log.Printf("Proxying %s for %s to %s", req.Method, toURI.User, destAddr.String())
@@ -190,7 +281,7 @@ func RebuildRequest(req *SIPRequest) string {
 	return builder.String()
 }
 
-func (s *Server) handleRegister(req *SIPRequest) string {
+func (s *Server) handleRegister(req *SIPRequest) *SIPResponse {
 	log.Printf("Handling REGISTER for %s", req.GetHeader("To"))
 
 	if len(req.Authorization) == 0 {
@@ -259,7 +350,7 @@ func (s *Server) updateRegistration(req *SIPRequest) {
 	}
 }
 
-func (s *Server) createOKResponse(req *SIPRequest) string {
+func (s *Server) createOKResponse(req *SIPRequest) *SIPResponse {
 	headers := map[string]string{
 		"Contact": fmt.Sprintf("%s;expires=%d", req.GetHeader("Contact"), req.Expires()),
 		"Date":    time.Now().UTC().Format(time.RFC1123),
@@ -267,7 +358,7 @@ func (s *Server) createOKResponse(req *SIPRequest) string {
 	return BuildResponse(200, "OK", req, headers)
 }
 
-func (s *Server) createUnauthorizedResponse(req *SIPRequest) string {
+func (s *Server) createUnauthorizedResponse(req *SIPRequest) *SIPResponse {
 	nonce, _ := s.generateNonce()
 	authValue := fmt.Sprintf(`Digest realm="%s", nonce="%s", algorithm=MD5, qop="auth"`, s.realm, nonce)
 	headers := map[string]string{
