@@ -18,8 +18,8 @@ type Registration struct {
 	ExpiresAt  time.Time
 }
 
-// Server holds the dependencies for the SIP server.
-type Server struct {
+// SIPServer holds the dependencies for the SIP server.
+type SIPServer struct {
 	storage       *storage.Storage
 	txManager     *TransactionManager
 	registrations map[string]Registration
@@ -30,9 +30,9 @@ type Server struct {
 	listenAddr    string // The address this server is listening on, e.g., "1.2.3.4:5060"
 }
 
-// NewServer creates a new SIP server instance.
-func NewServer(s *storage.Storage, realm string) *Server {
-	return &Server{
+// NewSIPServer creates a new SIP server instance.
+func NewSIPServer(s *storage.Storage, realm string) *SIPServer {
+	return &SIPServer{
 		storage:       s,
 		txManager:     NewTransactionManager(),
 		registrations: make(map[string]Registration),
@@ -42,7 +42,7 @@ func NewServer(s *storage.Storage, realm string) *Server {
 }
 
 // Run starts the SIP server listening on a UDP port.
-func (s *Server) Run(ctx context.Context, addr string) error {
+func (s *SIPServer) Run(ctx context.Context, addr string) error {
 	pc, err := net.ListenPacket("udp", addr)
 	if err != nil {
 		return fmt.Errorf("could not listen on UDP: %w", err)
@@ -75,7 +75,7 @@ func (s *Server) Run(ctx context.Context, addr string) error {
 
 // handleRequest is the new entry point for all incoming SIP requests.
 // It manages transactions and dispatches requests to the appropriate handlers.
-func (s *Server) handleRequest(pc net.PacketConn, rawMsg string, remoteAddr net.Addr) {
+func (s *SIPServer) handleRequest(pc net.PacketConn, rawMsg string, remoteAddr net.Addr) {
 	req, err := ParseSIPRequest(rawMsg)
 	if err != nil {
 		log.Printf("Error parsing SIP request: %v", err)
@@ -128,7 +128,7 @@ func (s *Server) handleRequest(pc net.PacketConn, rawMsg string, remoteAddr net.
 }
 
 // handleTransaction is the Transaction User (TU) for server transactions.
-func (s *Server) handleTransaction(srvTx ServerTransaction, pc net.PacketConn) {
+func (s *SIPServer) handleTransaction(srvTx ServerTransaction, pc net.PacketConn) {
 	select {
 	case req := <-srvTx.Requests():
 		switch req.Method {
@@ -150,7 +150,7 @@ func (s *Server) handleTransaction(srvTx ServerTransaction, pc net.PacketConn) {
 }
 
 // doProxy is the stateful proxy logic.
-func (s *Server) doProxy(originalReq *SIPRequest, upstreamTx ServerTransaction, pc net.PacketConn) {
+func (s *SIPServer) doProxy(originalReq *SIPRequest, upstreamTx ServerTransaction, pc net.PacketConn) {
 	toURI, err := originalReq.GetSIPURIHeader("To")
 	if err != nil {
 		upstreamTx.Respond(BuildResponse(400, "Bad Request", originalReq, map[string]string{"Warning": "Malformed To header"}))
@@ -232,7 +232,7 @@ func (s *Server) doProxy(originalReq *SIPRequest, upstreamTx ServerTransaction, 
 }
 
 // prepareForwardedRequest creates a copy of a request suitable for forwarding.
-func (s *Server) prepareForwardedRequest(req *SIPRequest) *SIPRequest {
+func (s *SIPServer) prepareForwardedRequest(req *SIPRequest) *SIPRequest {
 	fwdReq := &SIPRequest{
 		Method:  req.Method,
 		URI:     req.URI,
@@ -272,14 +272,14 @@ func (s *Server) prepareForwardedRequest(req *SIPRequest) *SIPRequest {
 	return fwdReq
 }
 
-func (s *Server) handleStateless(pc net.PacketConn, req *SIPRequest, remoteAddr net.Addr) {
+func (s *SIPServer) handleStateless(pc net.PacketConn, req *SIPRequest, remoteAddr net.Addr) {
 	response := BuildResponse(405, "Method Not Allowed", req, nil)
 	if _, err := pc.WriteTo([]byte(response.String()), remoteAddr); err != nil {
 		log.Printf("Error sending 405 response: %v", err)
 	}
 }
 
-func (s *Server) handleRegister(req *SIPRequest) *SIPResponse {
+func (s *SIPServer) handleRegister(req *SIPRequest) *SIPResponse {
 	log.Printf("Handling REGISTER for %s", req.GetHeader("To"))
 
 	if len(req.Authorization) == 0 {
@@ -319,7 +319,7 @@ func (s *Server) handleRegister(req *SIPRequest) *SIPResponse {
 	return s.createOKResponse(req)
 }
 
-func (s *Server) updateRegistration(req *SIPRequest) {
+func (s *SIPServer) updateRegistration(req *SIPRequest) {
 	s.regMutex.Lock()
 	defer s.regMutex.Unlock()
 
@@ -348,7 +348,7 @@ func (s *Server) updateRegistration(req *SIPRequest) {
 	}
 }
 
-func (s *Server) createOKResponse(req *SIPRequest) *SIPResponse {
+func (s *SIPServer) createOKResponse(req *SIPRequest) *SIPResponse {
 	headers := map[string]string{
 		"Contact": fmt.Sprintf("%s;expires=%d", req.GetHeader("Contact"), req.Expires()),
 		"Date":    time.Now().UTC().Format(time.RFC1123),
@@ -356,7 +356,7 @@ func (s *Server) createOKResponse(req *SIPRequest) *SIPResponse {
 	return BuildResponse(200, "OK", req, headers)
 }
 
-func (s *Server) createUnauthorizedResponse(req *SIPRequest) *SIPResponse {
+func (s *SIPServer) createUnauthorizedResponse(req *SIPRequest) *SIPResponse {
 	nonce, _ := s.generateNonce()
 	authValue := fmt.Sprintf(`Digest realm="%s", nonce="%s", algorithm=MD5, qop="auth"`, s.realm, nonce)
 	headers := map[string]string{
@@ -365,7 +365,7 @@ func (s *Server) createUnauthorizedResponse(req *SIPRequest) *SIPResponse {
 	return BuildResponse(401, "Unauthorized", req, headers)
 }
 
-func (s *Server) generateNonce() (string, error) {
+func (s *SIPServer) generateNonce() (string, error) {
 	nonce := GenerateNonce(8)
 	s.nonceMutex.Lock()
 	defer s.nonceMutex.Unlock()
@@ -373,7 +373,7 @@ func (s *Server) generateNonce() (string, error) {
 	return nonce, nil
 }
 
-func (s *Server) validateNonce(nonce string) bool {
+func (s *SIPServer) validateNonce(nonce string) bool {
 	s.nonceMutex.Lock()
 	defer s.nonceMutex.Unlock()
 

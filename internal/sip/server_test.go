@@ -20,7 +20,7 @@ func TestStatefulProxy(t *testing.T) {
 	s, _ := storage.NewStorage(":memory:")
 	defer s.Close()
 	realm := "test.com"
-	server := NewServer(s, realm)
+	server := NewSIPServer(s, realm)
 	server.listenAddr = "127.0.0.1:5060"
 
 	// Add a registration for 'bob'

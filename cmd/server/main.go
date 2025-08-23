@@ -41,7 +41,7 @@ func main() {
 	}
 
 	// Create SIP server
-	sipServer := sip.NewServer(s, *realm)
+	sipServer := sip.NewSIPServer(s, *realm)
 
 	// --- Server Execution ---
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
