@@ -1,19 +1,19 @@
 # Go SIP Server and Registrar
 
-This project is a SIP server written in Go that acts as a Registrar, compliant with RFC3261 for the REGISTER method. It provides a simple web interface for managing user credentials for Digest Authentication.
+This project is a SIP server written in Go that acts as a Registrar and a stateful Proxy. It is compliant with RFC3261 for the REGISTER method and can proxy methods like INVITE, ACK, and BYE between registered users. It provides a simple web interface for managing user credentials for Digest Authentication.
 
-The server listens for SIP traffic on both UDP and TCP, and serves a web UI on a separate port.
+The server listens for SIP traffic on UDP and serves a web UI on a separate port.
 
 ## Features
 
-- **SIP Registrar**: Handles `REGISTER` requests from SIP clients.
+- **SIP Registrar**: Handles `REGISTER` requests from SIP clients to bind a user to a location.
+- **SIP Proxy**: Forwards requests like `INVITE` and `BYE` between registered users on the same domain. It acts as a stateful proxy by using the `Record-Route` header to remain in the signaling path.
 - **Digest Authentication**: Authenticates users using Digest Authentication (MD5) as per RFC2617.
 - **Web UI**: A simple web interface to add and view users and their authentication credentials (HA1 hashes).
 - **Pure Go**: Built with pure Go libraries, including a pure-Go SQLite driver, making it easy to compile and deploy.
 
 ## Dependencies
 
-- **SIP Stack**: `github.com/emiago/sipgo`
 - **Database**: `github.com/glebarez/go-sqlite` (for SQLite)
 - **Concurrency**: `golang.org/x/sync/errgroup`
 
