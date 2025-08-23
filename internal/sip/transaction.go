@@ -367,9 +367,19 @@ func (tx *InviteServerTx) run() {
 			switch {
 			case res.StatusCode >= 101 && res.StatusCode < 200:
 			case res.StatusCode >= 200 && res.StatusCode < 300:
-				tx.mu.Unlock()
-				tx.Terminate()
-				return
+				// For reliable transports, terminate immediately.
+				if strings.ToUpper(tx.proto) == "TCP" {
+					tx.mu.Unlock()
+					tx.Terminate()
+					return
+				}
+				// For unreliable transports, stay alive to handle retransmits of the INVITE
+				// and is terminated by the TU upon receipt of an ACK. We set a timer to
+				// prevent resource leaks if an ACK never arrives.
+				tx.timerH = time.AfterFunc(64*T1, func() {
+					log.Printf("INVITE server transaction %s timed out waiting for ACK for 2xx response.", tx.id)
+					tx.Terminate()
+				})
 			case res.StatusCode >= 300 && res.StatusCode < 700:
 				tx.state = TxStateCompleted
 				tx.startTimerG()
@@ -605,9 +615,8 @@ func (tx *InviteClientTx) ReceiveResponse(res *SIPResponse) {
 	if res.StatusCode >= 100 && res.StatusCode < 200 {
 		if tx.state == TxStateCalling {
 			tx.state = TxStateProceeding
-			if tx.timerA != nil {
-				tx.timerA.Stop()
-			}
+			// Timer A should not be stopped on provisional responses.
+			// It continues until a final response is received.
 		}
 		sendResponseToTU(res)
 		return
@@ -660,7 +669,11 @@ func (tx *InviteClientTx) startTimerA(interval time.Duration) {
 	tx.timerA = time.AfterFunc(interval, func() {
 		tx.mu.Lock()
 		defer tx.mu.Unlock()
-		if tx.state != TxStateCalling { return }
+		// Keep retransmitting until a final response is received (which moves the
+		// state to Completed or Terminated).
+		if tx.state != TxStateCalling && tx.state != TxStateProceeding {
+			return
+		}
 
 		tx.sendRequest()
 		tx.startTimerA(interval * 2)
