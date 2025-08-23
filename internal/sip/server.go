@@ -420,6 +420,11 @@ func (s *SIPServer) proxyInitialRequest(originalReq *SIPRequest, upstreamTx Serv
 	}
 
 	fwdReq := s.prepareForwardedRequest(originalReq, registration.ContactURI)
+	if fwdReq == nil {
+		log.Printf("Dropping request for user %s due to Max-Forwards limit", toURI.User)
+		upstreamTx.Respond(BuildResponse(483, "Too Many Hops", originalReq, nil))
+		return
+	}
 
 	var clientTx ClientTransaction
 	switch fwdReq.Method {
