@@ -8,12 +8,22 @@ import (
 	"time"
 )
 
+// InviteServerTxState defines the states for an INVITE server transaction.
+type InviteServerTxState int
+
+const (
+	InviteServerTxStateProceeding InviteServerTxState = iota
+	InviteServerTxStateCompleted
+	InviteServerTxStateConfirmed
+	InviteServerTxStateTerminated
+)
+
 // InviteServerTx implements the server-side INVITE transaction state machine.
 type InviteServerTx struct {
 	id           string
 	originalReq  *SIPRequest
 	lastResponse *SIPResponse
-	state        TxState
+	state        InviteServerTxState
 	mu           sync.RWMutex
 	timerG       *time.Timer
 	timerH       *time.Timer
@@ -39,7 +49,7 @@ func NewInviteServerTx(req *SIPRequest, transport net.PacketConn, remoteAddr net
 	tx := &InviteServerTx{
 		id:          branch,
 		originalReq: req,
-		state:       TxStateProceeding,
+		state:       InviteServerTxStateProceeding,
 		done:        make(chan bool),
 		responses:   make(chan *SIPResponse, 1),
 		requests:    make(chan *SIPRequest, 1),
@@ -60,12 +70,12 @@ func (tx *InviteServerTx) Requests() <-chan *SIPRequest { return tx.requests }
 
 func (tx *InviteServerTx) Terminate() {
 	tx.mu.Lock()
-	if tx.state == TxStateTerminated {
+	if tx.state == InviteServerTxStateTerminated {
 		tx.mu.Unlock()
 		return
 	}
 	log.Printf("Terminating INVITE server transaction %s", tx.id)
-	tx.state = TxStateTerminated
+	tx.state = InviteServerTxStateTerminated
 	if tx.timerG != nil { tx.timerG.Stop() }
 	if tx.timerH != nil { tx.timerH.Stop() }
 	if tx.timerI != nil { tx.timerI.Stop() }
@@ -76,9 +86,9 @@ func (tx *InviteServerTx) Terminate() {
 func (tx *InviteServerTx) Receive(req *SIPRequest) {
 	tx.mu.Lock()
 	if req.Method == "ACK" {
-		if tx.state == TxStateCompleted {
+		if tx.state == InviteServerTxStateCompleted {
 			log.Printf("ACK received for transaction %s, moving to Confirmed state.", tx.id)
-			tx.state = TxStateConfirmed
+			tx.state = InviteServerTxStateConfirmed
 			if tx.timerG != nil {
 				tx.timerG.Stop()
 			}
@@ -98,7 +108,7 @@ func (tx *InviteServerTx) Receive(req *SIPRequest) {
 	}
 
 	switch tx.state {
-	case TxStateProceeding, TxStateCompleted:
+	case InviteServerTxStateProceeding, InviteServerTxStateCompleted:
 		if tx.lastResponse != nil {
 			log.Printf("Retransmitting last response for INVITE transaction %s", tx.id)
 			tx.send(tx.lastResponse)
@@ -122,7 +132,7 @@ func (tx *InviteServerTx) run() {
 		select {
 		case res := <-tx.responses:
 			tx.mu.Lock()
-			if tx.state == TxStateTerminated {
+			if tx.state == InviteServerTxStateTerminated {
 				tx.mu.Unlock()
 				return
 			}
@@ -137,7 +147,7 @@ func (tx *InviteServerTx) run() {
 				tx.Terminate()
 				return
 			case res.StatusCode >= 300 && res.StatusCode < 700:
-				tx.state = TxStateCompleted
+				tx.state = InviteServerTxStateCompleted
 				tx.startTimerG()
 				tx.timerH = time.AfterFunc(64*T1, func() {
 					log.Printf("INVITE server transaction %s timed out waiting for ACK (Timer H).", tx.id)
@@ -159,7 +169,7 @@ func (tx *InviteServerTx) startTimerG() {
 	tx.timerG = time.AfterFunc(interval, func() {
 		tx.mu.Lock()
 		defer tx.mu.Unlock()
-		if tx.state != TxStateCompleted { return }
+		if tx.state != InviteServerTxStateCompleted { return }
 		log.Printf("Retransmitting final response for INVITE tx %s (Timer G)", tx.id)
 		tx.send(tx.lastResponse)
 		interval *= 2

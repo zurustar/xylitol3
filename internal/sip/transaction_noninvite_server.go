@@ -8,12 +8,22 @@ import (
 	"time"
 )
 
+// NonInviteServerTxState defines the states for a non-INVITE server transaction.
+type NonInviteServerTxState int
+
+const (
+	NonInviteServerTxStateTrying NonInviteServerTxState = iota
+	NonInviteServerTxStateProceeding
+	NonInviteServerTxStateCompleted
+	NonInviteServerTxStateTerminated
+)
+
 // NonInviteServerTx implements the server-side non-INVITE transaction state machine.
 type NonInviteServerTx struct {
 	id           string
 	originalReq  *SIPRequest
 	lastResponse *SIPResponse
-	state        TxState
+	state        NonInviteServerTxState
 	mu           sync.RWMutex
 	timerJ       *time.Timer
 	done         chan bool
@@ -38,7 +48,7 @@ func NewNonInviteServerTx(req *SIPRequest, transport net.PacketConn, remoteAddr 
 	tx := &NonInviteServerTx{
 		id:          branch,
 		originalReq: req,
-		state:       TxStateTrying,
+		state:       NonInviteServerTxStateTrying,
 		done:        make(chan bool),
 		responses:   make(chan *SIPResponse, 1),
 		requests:    make(chan *SIPRequest, 1),
@@ -63,12 +73,12 @@ func (tx *NonInviteServerTx) Done() <-chan bool {
 
 func (tx *NonInviteServerTx) Terminate() {
 	tx.mu.Lock()
-	if tx.state == TxStateTerminated {
+	if tx.state == NonInviteServerTxStateTerminated {
 		tx.mu.Unlock()
 		return
 	}
 	log.Printf("Terminating non-INVITE server transaction %s", tx.id)
-	tx.state = TxStateTerminated
+	tx.state = NonInviteServerTxStateTerminated
 	if tx.timerJ != nil {
 		tx.timerJ.Stop()
 	}
@@ -80,8 +90,8 @@ func (tx *NonInviteServerTx) Receive(req *SIPRequest) {
 	tx.mu.RLock()
 	defer tx.mu.RUnlock()
 	switch tx.state {
-	case TxStateTrying:
-	case TxStateProceeding, TxStateCompleted:
+	case NonInviteServerTxStateTrying:
+	case NonInviteServerTxStateProceeding, NonInviteServerTxStateCompleted:
 		if tx.lastResponse != nil {
 			log.Printf("Retransmitting last response for transaction %s", tx.id)
 			tx.send(tx.lastResponse)
@@ -108,11 +118,11 @@ func (tx *NonInviteServerTx) run() {
 		select {
 		case res := <-tx.responses:
 			tx.mu.Lock()
-			if tx.state == TxStateTerminated {
+			if tx.state == NonInviteServerTxStateTerminated {
 				tx.mu.Unlock()
 				return
 			}
-			if tx.state == TxStateCompleted && tx.lastResponse.StatusCode >= 200 {
+			if tx.state == NonInviteServerTxStateCompleted && tx.lastResponse.StatusCode >= 200 {
 				log.Printf("Ignoring new final response for completed transaction %s", tx.id)
 				tx.mu.Unlock()
 				continue
@@ -120,7 +130,7 @@ func (tx *NonInviteServerTx) run() {
 			tx.lastResponse = res
 			tx.send(res)
 			if res.StatusCode >= 200 {
-				tx.state = TxStateCompleted
+				tx.state = NonInviteServerTxStateCompleted
 				// For reliable transports, terminate immediately. For unreliable, start Timer J.
 				if isReliable(tx.proto) {
 					tx.mu.Unlock() // Unlock before calling Terminate
@@ -129,7 +139,7 @@ func (tx *NonInviteServerTx) run() {
 				}
 				tx.timerJ = time.AfterFunc(64*T1, tx.Terminate)
 			} else {
-				tx.state = TxStateProceeding
+				tx.state = NonInviteServerTxStateProceeding
 			}
 			tx.mu.Unlock()
 		case <-tx.done:
