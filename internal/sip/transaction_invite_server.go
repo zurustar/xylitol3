@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"strings"
 	"sync"
 	"time"
 )
@@ -76,17 +75,28 @@ func (tx *InviteServerTx) Terminate() {
 
 func (tx *InviteServerTx) Receive(req *SIPRequest) {
 	tx.mu.Lock()
-	defer tx.mu.Unlock()
 	if req.Method == "ACK" {
 		if tx.state == TxStateCompleted {
 			log.Printf("ACK received for transaction %s, moving to Confirmed state.", tx.id)
 			tx.state = TxStateConfirmed
-			if tx.timerG != nil { tx.timerG.Stop() }
-			if tx.timerH != nil { tx.timerH.Stop() }
+			if tx.timerG != nil {
+				tx.timerG.Stop()
+			}
+			if tx.timerH != nil {
+				tx.timerH.Stop()
+			}
+			// For reliable transports, terminate immediately. For unreliable, start Timer I.
+			if isReliable(tx.proto) {
+				tx.mu.Unlock() // Unlock before calling Terminate which locks again
+				tx.Terminate()
+				return
+			}
 			tx.timerI = time.AfterFunc(T4, tx.Terminate)
 		}
+		tx.mu.Unlock()
 		return
 	}
+
 	switch tx.state {
 	case TxStateProceeding, TxStateCompleted:
 		if tx.lastResponse != nil {
@@ -94,6 +104,7 @@ func (tx *InviteServerTx) Receive(req *SIPRequest) {
 			tx.send(tx.lastResponse)
 		}
 	}
+	tx.mu.Unlock()
 }
 
 func (tx *InviteServerTx) Respond(res *SIPResponse) error {
@@ -141,7 +152,7 @@ func (tx *InviteServerTx) run() {
 }
 
 func (tx *InviteServerTx) startTimerG() {
-	if strings.ToUpper(tx.proto) == "TCP" {
+	if isReliable(tx.proto) {
 		return // Do not retransmit responses over reliable transport
 	}
 	interval := T1

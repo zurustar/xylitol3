@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
@@ -43,6 +44,16 @@ func GenerateNonce(n int) string {
 	b := make([]byte, n)
 	rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+// isReliable checks if the given transport protocol is reliable (e.g., TCP, SCTP, TLS).
+func isReliable(proto string) bool {
+	switch strings.ToUpper(proto) {
+	case "TCP", "SCTP", "TLS":
+		return true
+	default:
+		return false
+	}
 }
 
 // --- Transaction Interfaces ---
