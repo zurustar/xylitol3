@@ -7,11 +7,21 @@ import (
 	"time"
 )
 
+// NonInviteClientTxState defines the states for a non-INVITE client transaction.
+type NonInviteClientTxState int
+
+const (
+	NonInviteClientTxStateTrying NonInviteClientTxState = iota
+	NonInviteClientTxStateProceeding
+	NonInviteClientTxStateCompleted
+	NonInviteClientTxStateTerminated
+)
+
 // NonInviteClientTx implements the client-side non-INVITE transaction state machine.
 type NonInviteClientTx struct {
 	id        string
 	request   *SIPRequest
-	state     TxState
+	state     NonInviteClientTxState
 	mu        sync.RWMutex
 	timerE    *time.Timer
 	timerF    *time.Timer
@@ -31,7 +41,7 @@ func NewNonInviteClientTx(req *SIPRequest, transport net.PacketConn, dest net.Ad
 	tx := &NonInviteClientTx{
 		id:        topVia.Branch(),
 		request:   req,
-		state:     TxStateTrying,
+		state:     NonInviteClientTxStateTrying,
 		done:      make(chan bool),
 		responses: make(chan *SIPResponse, 1),
 		transport: transport,
@@ -48,12 +58,12 @@ func (tx *NonInviteClientTx) Responses() <-chan *SIPResponse { return tx.respons
 
 func (tx *NonInviteClientTx) Terminate() {
 	tx.mu.Lock()
-	if tx.state == TxStateTerminated {
+	if tx.state == NonInviteClientTxStateTerminated {
 		tx.mu.Unlock()
 		return
 	}
 	log.Printf("Terminating non-INVITE client transaction %s", tx.id)
-	tx.state = TxStateTerminated
+	tx.state = NonInviteClientTxStateTerminated
 	if tx.timerE != nil { tx.timerE.Stop() }
 	if tx.timerF != nil { tx.timerF.Stop() }
 	if tx.timerK != nil { tx.timerK.Stop() }
@@ -63,7 +73,7 @@ func (tx *NonInviteClientTx) Terminate() {
 
 func (tx *NonInviteClientTx) ReceiveResponse(res *SIPResponse) {
 	tx.mu.Lock()
-	if tx.state == TxStateTerminated || tx.state == TxStateCompleted {
+	if tx.state == NonInviteClientTxStateTerminated || tx.state == NonInviteClientTxStateCompleted {
 		tx.mu.Unlock()
 		return
 	}
@@ -78,7 +88,7 @@ func (tx *NonInviteClientTx) ReceiveResponse(res *SIPResponse) {
 
 	sendResponseToTU(res)
 	if res.StatusCode >= 200 {
-		tx.state = TxStateCompleted
+		tx.state = NonInviteClientTxStateCompleted
 		if tx.timerE != nil {
 			tx.timerE.Stop()
 		}
@@ -92,7 +102,7 @@ func (tx *NonInviteClientTx) ReceiveResponse(res *SIPResponse) {
 		}
 		tx.timerK = time.AfterFunc(T4, tx.Terminate)
 	} else {
-		tx.state = TxStateProceeding
+		tx.state = NonInviteClientTxStateProceeding
 	}
 	tx.mu.Unlock()
 }
@@ -116,12 +126,12 @@ func (tx *NonInviteClientTx) startTimerE(interval time.Duration) {
 	tx.timerE = time.AfterFunc(interval, func() {
 		tx.mu.Lock()
 		defer tx.mu.Unlock()
-		if tx.state != TxStateTrying && tx.state != TxStateProceeding { return }
+		if tx.state != NonInviteClientTxStateTrying && tx.state != NonInviteClientTxStateProceeding { return }
 
 		tx.sendRequest()
 
 		newInterval := interval * 2
-		if tx.state == TxStateProceeding || newInterval > T2 {
+		if tx.state == NonInviteClientTxStateProceeding || newInterval > T2 {
 			newInterval = T2
 		}
 		tx.startTimerE(newInterval)

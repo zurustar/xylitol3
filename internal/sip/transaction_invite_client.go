@@ -7,11 +7,21 @@ import (
 	"time"
 )
 
+// InviteClientTxState defines the states for an INVITE client transaction.
+type InviteClientTxState int
+
+const (
+	InviteClientTxStateCalling InviteClientTxState = iota
+	InviteClientTxStateProceeding
+	InviteClientTxStateCompleted
+	InviteClientTxStateTerminated
+)
+
 // InviteClientTx implements the client-side INVITE transaction state machine.
 type InviteClientTx struct {
 	id        string
 	request   *SIPRequest
-	state     TxState
+	state     InviteClientTxState
 	mu        sync.RWMutex
 	timerA    *time.Timer
 	timerB    *time.Timer
@@ -31,7 +41,7 @@ func NewInviteClientTx(req *SIPRequest, transport net.PacketConn, dest net.Addr,
 	tx := &InviteClientTx{
 		id:        topVia.Branch(),
 		request:   req,
-		state:     TxStateCalling,
+		state:     InviteClientTxStateCalling,
 		done:      make(chan bool),
 		responses: make(chan *SIPResponse, 1),
 		transport: transport,
@@ -48,12 +58,12 @@ func (tx *InviteClientTx) Responses() <-chan *SIPResponse { return tx.responses 
 
 func (tx *InviteClientTx) Terminate() {
 	tx.mu.Lock()
-	if tx.state == TxStateTerminated {
+	if tx.state == InviteClientTxStateTerminated {
 		tx.mu.Unlock()
 		return
 	}
 	log.Printf("Terminating INVITE client transaction %s", tx.id)
-	tx.state = TxStateTerminated
+	tx.state = InviteClientTxStateTerminated
 	if tx.timerA != nil { tx.timerA.Stop() }
 	if tx.timerB != nil { tx.timerB.Stop() }
 	if tx.timerD != nil { tx.timerD.Stop() }
@@ -64,7 +74,7 @@ func (tx *InviteClientTx) Terminate() {
 func (tx *InviteClientTx) ReceiveResponse(res *SIPResponse) {
 	tx.mu.Lock()
 
-	if tx.state == TxStateTerminated {
+	if tx.state == InviteClientTxStateTerminated {
 		tx.mu.Unlock()
 		return
 	}
@@ -78,8 +88,8 @@ func (tx *InviteClientTx) ReceiveResponse(res *SIPResponse) {
 	}
 
 	if res.StatusCode >= 100 && res.StatusCode < 200 {
-		if tx.state == TxStateCalling {
-			tx.state = TxStateProceeding
+		if tx.state == InviteClientTxStateCalling {
+			tx.state = InviteClientTxStateProceeding
 			// Per RFC 3261 Section 17.1.1.2, stop retransmitting on provisional response.
 			if tx.timerA != nil {
 				tx.timerA.Stop()
@@ -91,8 +101,8 @@ func (tx *InviteClientTx) ReceiveResponse(res *SIPResponse) {
 	}
 
 	if res.StatusCode >= 300 {
-		if tx.state == TxStateCalling || tx.state == TxStateProceeding {
-			tx.state = TxStateCompleted
+		if tx.state == InviteClientTxStateCalling || tx.state == InviteClientTxStateProceeding {
+			tx.state = InviteClientTxStateCompleted
 			sendResponseToTU(res)
 			tx.sendAck(res) // Send ACK for non-2xx final response
 			if isReliable(tx.proto) {
@@ -101,7 +111,7 @@ func (tx *InviteClientTx) ReceiveResponse(res *SIPResponse) {
 				return
 			}
 			tx.timerD = time.AfterFunc(32*time.Second, tx.Terminate)
-		} else if tx.state == TxStateCompleted {
+		} else if tx.state == InviteClientTxStateCompleted {
 			// Retransmission of the final response. The transaction re-sends the ACK.
 			tx.sendAck(res)
 		}
@@ -110,8 +120,8 @@ func (tx *InviteClientTx) ReceiveResponse(res *SIPResponse) {
 	}
 
 	if res.StatusCode >= 200 && res.StatusCode < 300 {
-		if tx.state == TxStateCalling || tx.state == TxStateProceeding {
-			tx.state = TxStateTerminated
+		if tx.state == InviteClientTxStateCalling || tx.state == InviteClientTxStateProceeding {
+			tx.state = InviteClientTxStateTerminated
 			sendResponseToTU(res)
 			// No need to unlock, Terminate will be called by run() which will unlock.
 			// However, direct call to Terminate is better. Let's unlock and terminate.
@@ -153,7 +163,7 @@ func (tx *InviteClientTx) startTimerA(interval time.Duration) {
 		tx.mu.Lock()
 		defer tx.mu.Unlock()
 		// Per RFC, retransmissions are only sent in the "Calling" state.
-		if tx.state != TxStateCalling {
+		if tx.state != InviteClientTxStateCalling {
 			return
 		}
 

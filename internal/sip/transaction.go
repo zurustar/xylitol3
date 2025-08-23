@@ -20,18 +20,6 @@ var (
 	T4 = 5 * time.Second
 )
 
-// FSM States for Transactions
-type TxState int
-
-const (
-	TxStateTrying TxState = iota
-	TxStateProceeding
-	TxStateCompleted
-	TxStateConfirmed
-	TxStateTerminated
-	TxStateCalling // Client specific
-)
-
 // GenerateBranchID generates a new RFC3261 compliant branch ID.
 func GenerateBranchID() string {
 	b := make([]byte, 8) // 16 hex characters
