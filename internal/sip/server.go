@@ -20,14 +20,16 @@ type Registration struct {
 
 // SIPServer holds the dependencies for the SIP server.
 type SIPServer struct {
-	storage       *storage.Storage
-	txManager     *TransactionManager
-	registrations map[string]Registration
-	regMutex      sync.RWMutex
-	nonces        map[string]time.Time
-	nonceMutex    sync.Mutex
-	realm         string
-	listenAddr    string // The address this server is listening on, e.g., "1.2.3.4:5060"
+	storage        *storage.Storage
+	txManager      *TransactionManager
+	registrations  map[string]Registration
+	regMutex       sync.RWMutex
+	nonces         map[string]time.Time
+	nonceMutex     sync.Mutex
+	realm          string
+	listenAddr     string // The address this server is listening on, e.g., "1.2.3.4:5060"
+	proxiedTxs     map[string]ClientTransaction
+	proxiedTxMutex sync.RWMutex
 }
 
 // NewSIPServer creates a new SIP server instance.
@@ -38,6 +40,7 @@ func NewSIPServer(s *storage.Storage, realm string) *SIPServer {
 		registrations: make(map[string]Registration),
 		nonces:        make(map[string]time.Time),
 		realm:         realm,
+		proxiedTxs:    make(map[string]ClientTransaction),
 	}
 }
 
@@ -124,6 +127,35 @@ func (s *SIPServer) handleRequest(pc net.PacketConn, rawMsg string, remoteAddr n
 		return
 	}
 
+	// Per RFC 3261, CANCEL and ACK are special hop-by-hop requests.
+	// They are handled outside of the standard transaction state machines.
+	if req.Method == "CANCEL" {
+		s.handleCancel(pc, req, remoteAddr)
+		return
+	}
+	if req.Method == "ACK" {
+		// ACKs for 2xx responses are hop-by-hop and stateless from a transaction perspective.
+		// They must be routed based on the Route header.
+		if req.GetHeader("Route") != "" {
+			s.proxyAckRequest(req, pc, remoteAddr)
+		} else {
+			// This could be an ACK for a non-2xx response that was retransmitted to us.
+			// Find the transaction and pass it the ACK.
+			topVia, err := req.TopVia()
+			if err == nil {
+				if tx, ok := s.txManager.Get(topVia.Branch()); ok {
+					if srvTx, ok := tx.(*InviteServerTx); ok {
+						log.Printf("Passing ACK to Invite Server Tx %s", srvTx.ID())
+						srvTx.Receive(req)
+						return
+					}
+				}
+			}
+			log.Printf("Received ACK without Route header and no matching transaction. Assuming stray and dropping.")
+		}
+		return
+	}
+
 	topVia, err := req.TopVia()
 	if err != nil {
 		log.Printf("Could not get Via header: %v", err)
@@ -137,14 +169,16 @@ func (s *SIPServer) handleRequest(pc net.PacketConn, rawMsg string, remoteAddr n
 		return
 	}
 
+	// Check for retransmissions.
 	if tx, ok := s.txManager.Get(branchID); ok {
-		log.Printf("Retransmission received for transaction %s", branchID)
+		log.Printf("Retransmission of %s received for transaction %s", req.Method, branchID)
 		if srvTx, ok := tx.(ServerTransaction); ok {
 			srvTx.Receive(req)
 		}
 		return
 	}
 
+	// If it's a new request, create a new transaction.
 	log.Printf("New request received, creating transaction %s for method %s", branchID, req.Method)
 	var srvTx ServerTransaction
 	switch req.Method {
@@ -152,18 +186,6 @@ func (s *SIPServer) handleRequest(pc net.PacketConn, rawMsg string, remoteAddr n
 		srvTx, err = NewNonInviteServerTx(req, pc, remoteAddr, "UDP")
 	case "INVITE":
 		srvTx, err = NewInviteServerTx(req, pc, remoteAddr, "UDP")
-	case "ACK":
-		// ACKs for 2xx responses are hop-by-hop and stateless from a transaction perspective.
-		// They must be routed based on the Route header.
-		if req.GetHeader("Route") != "" {
-			s.proxyAckRequest(req, pc, remoteAddr)
-		} else {
-			// This could be an ACK for a non-2xx response that was retransmitted.
-			// The transaction layer should have already consumed it. If it reaches here,
-			// it's a stray ACK.
-			log.Printf("Received ACK without Route header. Assuming stray and dropping.")
-		}
-		return
 	case "BYE":
 		srvTx, err = NewNonInviteServerTx(req, pc, remoteAddr, "UDP")
 	default:
@@ -448,7 +470,17 @@ func (s *SIPServer) proxyInitialRequest(originalReq *SIPRequest, upstreamTx Serv
 // forwardAndStitch handles the forwarding of a request via a client transaction
 // and stitches the response back to the upstream server transaction.
 func (s *SIPServer) forwardAndStitch(upstreamTx ServerTransaction, clientTx ClientTransaction) {
+	s.proxiedTxMutex.Lock()
+	s.proxiedTxs[upstreamTx.ID()] = clientTx
+	s.proxiedTxMutex.Unlock()
+
 	go func() {
+		defer func() {
+			s.proxiedTxMutex.Lock()
+			delete(s.proxiedTxs, upstreamTx.ID())
+			s.proxiedTxMutex.Unlock()
+		}()
+
 		for {
 			select {
 			case res := <-clientTx.Responses():
@@ -642,4 +674,97 @@ func (s *SIPServer) validateNonce(nonce string) bool {
 
 	delete(s.nonces, nonce)
 	return true
+}
+
+func (s *SIPServer) handleCancel(pc net.PacketConn, req *SIPRequest, remoteAddr net.Addr) {
+	log.Printf("Handling CANCEL request for Call-ID %s", req.GetHeader("Call-ID"))
+
+	topVia, err := req.TopVia()
+	if err != nil {
+		log.Printf("Could not get Via from CANCEL request: %v", err)
+		return
+	}
+	branchID := topVia.Branch()
+
+	tx, ok := s.txManager.Get(branchID)
+	if !ok {
+		// If the original server transaction is not found, it likely has already been
+		// completed and terminated. Per RFC 3261 Section 16.8, the proxy must
+		// still respond 200 OK to the CANCEL.
+		log.Printf("Could not find transaction %s to cancel. Responding 200 OK statelessly.", branchID)
+		res200 := BuildResponse(200, "OK", req, nil)
+		if _, err := pc.WriteTo([]byte(res200.String()), remoteAddr); err != nil {
+			log.Printf("Error sending 200 OK for CANCEL: %v", err)
+		}
+		return
+	}
+
+	srvTx, isServerTx := tx.(ServerTransaction)
+	if !isServerTx {
+		log.Printf("Transaction %s found, but it is not a server transaction. Cannot process CANCEL.", branchID)
+		// Still respond 200 OK to the CANCEL as we've consumed it.
+		res200 := BuildResponse(200, "OK", req, nil)
+		if _, err := pc.WriteTo([]byte(res200.String()), remoteAddr); err != nil {
+			log.Printf("Error sending 200 OK for CANCEL: %v", err)
+		}
+		return
+	}
+
+	// Immediately respond 200 OK to the CANCEL request.
+	res200 := BuildResponse(200, "OK", req, nil)
+	log.Printf("Sending 200 OK for CANCEL to %s", remoteAddr)
+	if _, err := pc.WriteTo([]byte(res200.String()), remoteAddr); err != nil {
+		log.Printf("Error sending 200 OK for CANCEL: %v", err)
+	}
+
+	// Check if this INVITE was proxied and cancel the downstream leg.
+	s.proxiedTxMutex.RLock()
+	clientTx, foundProxy := s.proxiedTxs[branchID]
+	s.proxiedTxMutex.RUnlock()
+
+	if foundProxy {
+		log.Printf("Found downstream client transaction %s to cancel", clientTx.ID())
+		cancelReq := createCancelRequest(clientTx.OriginalRequest())
+		// The destination for the CANCEL is the same as the INVITE's client transaction
+		if inviteClientTx, ok := clientTx.(*InviteClientTx); ok {
+			destAddr := inviteClientTx.destAddr
+			log.Printf("Proxying CANCEL to %s", destAddr)
+			if _, err := pc.WriteTo([]byte(cancelReq.String()), destAddr); err != nil {
+				log.Printf("Error proxying CANCEL request: %v", err)
+			}
+		}
+	}
+
+	// Respond 487 to the original INVITE.
+	res487 := BuildResponse(487, "Request Terminated", srvTx.OriginalRequest(), nil)
+	if err := srvTx.Respond(res487); err != nil {
+		log.Printf("Error sending 487 response to original INVITE tx %s: %v", branchID, err)
+	}
+
+	// The transaction will terminate itself upon sending the 487 response.
+}
+
+func createCancelRequest(inviteReq *SIPRequest) *SIPRequest {
+	cancelReq := &SIPRequest{
+		Method:  "CANCEL",
+		URI:     inviteReq.URI,
+		Proto:   inviteReq.Proto,
+		Headers: make(map[string]string),
+		Body:    []byte{},
+	}
+	// Copy essential headers per RFC 3261 Section 16.3
+	for _, h := range []string{"From", "To", "Call-ID", "Via"} {
+		cancelReq.Headers[h] = inviteReq.Headers[h]
+	}
+
+	// CSeq number must be the same, but the method is CANCEL
+	cseqStr := inviteReq.GetHeader("CSeq")
+	if parts := strings.SplitN(cseqStr, " ", 2); len(parts) == 2 {
+		cancelReq.Headers["CSeq"] = parts[0] + " CANCEL"
+	} else {
+		// This should not happen with valid requests
+		cancelReq.Headers["CSeq"] = "1 CANCEL"
+	}
+	cancelReq.Headers["Max-Forwards"] = "70"
+	return cancelReq
 }

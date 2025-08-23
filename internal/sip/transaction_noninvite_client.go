@@ -55,6 +55,7 @@ func NewNonInviteClientTx(req *SIPRequest, transport net.PacketConn, dest net.Ad
 func (tx *NonInviteClientTx) ID() string { return tx.id }
 func (tx *NonInviteClientTx) Done() <-chan bool { return tx.done }
 func (tx *NonInviteClientTx) Responses() <-chan *SIPResponse { return tx.responses }
+func (tx *NonInviteClientTx) OriginalRequest() *SIPRequest { return tx.request }
 
 func (tx *NonInviteClientTx) Terminate() {
 	tx.mu.Lock()
