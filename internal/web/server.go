@@ -12,20 +12,27 @@ import (
 
 // Server holds the dependencies for the web server.
 type Server struct {
-	storage *storage.Storage
-	// templates map[string]*template.Template
-	// For simplicity, we'll parse templates on each request.
-	// In a production app, you would parse them once at startup.
+	storage   *storage.Storage
+	templates map[string]*template.Template
+	realm     string
 }
 
 // NewServer creates a new web server instance.
-func NewServer(s *storage.Storage) *Server {
-	return &Server{storage: s}
+func NewServer(s *storage.Storage, realm string) (*Server, error) {
+	templates, err := parseTemplates()
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse templates: %w", err)
+	}
+
+	return &Server{
+		storage:   s,
+		templates: templates,
+		realm:     realm,
+	}, nil
 }
 
 // Run starts the web server on the given address.
 func (s *Server) Run(addr string) error {
-	log.Printf("Starting web server on %s", addr)
 	mux := http.NewServeMux()
 	s.registerRoutes(mux)
 	return http.ListenAndServe(addr, mux)
@@ -39,6 +46,30 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 
 func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/users", http.StatusFound)
+}
+
+// parseTemplates parses all .html files in the templates directory and returns a map
+// of template names to parsed templates.
+func parseTemplates() (map[string]*template.Template, error) {
+	templates := make(map[string]*template.Template)
+	templateDir := filepath.Join("internal", "web", "templates")
+
+	files, err := filepath.Glob(filepath.Join(templateDir, "*.html"))
+	if err != nil {
+		return nil, fmt.Errorf("failed to find template files: %w", err)
+	}
+
+	for _, file := range files {
+		name := filepath.Base(file)
+		tmpl, err := template.ParseFiles(file)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse template %s: %w", name, err)
+		}
+		templates[name] = tmpl
+	}
+
+	log.Printf("Successfully parsed %d templates", len(templates))
+	return templates, nil
 }
 
 func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
@@ -69,16 +100,7 @@ func (s *Server) handleUsersList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// For simplicity, defining template path relative to this file.
-	// A more robust solution might use an embedded filesystem or a configurable path.
-	templatePath := filepath.Join("internal", "web", "templates", "users.html")
-	tmpl, err := template.ParseFiles(templatePath)
-	if err != nil {
-		log.Printf("Error parsing template: %v", err)
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-		return
-	}
-
+	tmpl := s.templates["users.html"]
 	if err := tmpl.Execute(w, users); err != nil {
 		log.Printf("Error executing template: %v", err)
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
@@ -86,13 +108,7 @@ func (s *Server) handleUsersList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUsersNewForm(w http.ResponseWriter, r *http.Request) {
-	templatePath := filepath.Join("internal", "web", "templates", "users_new.html")
-	tmpl, err := template.ParseFiles(templatePath)
-	if err != nil {
-		log.Printf("Error parsing template: %v", err)
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-		return
-	}
+	tmpl := s.templates["users_new.html"]
 	if err := tmpl.Execute(w, nil); err != nil {
 		log.Printf("Error executing template: %v", err)
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
@@ -107,17 +123,16 @@ func (s *Server) handleUsersNewSubmit(w http.ResponseWriter, r *http.Request) {
 
 	username := r.FormValue("username")
 	password := r.FormValue("password")
-	realm := r.FormValue("realm") // Usually a domain like 'example.com'
 
-	if username == "" || password == "" || realm == "" {
-		http.Error(w, "Username, password, and realm are required", http.StatusBadRequest)
+	if username == "" || password == "" {
+		http.Error(w, "Username and password are required", http.StatusBadRequest)
 		return
 	}
 
 	// As per RFC 2617, the A1 part of digest auth is username:realm:password
 	// The password stored should be the MD5 hash of this string.
 	// H(A1) = MD5(username:realm:password)
-	ha1 := fmt.Sprintf("%s:%s:%s", username, realm, password)
+	ha1 := fmt.Sprintf("%s:%s:%s", username, s.realm, password)
 	ha1Hash := fmt.Sprintf("%x", md5.Sum([]byte(ha1)))
 
 	user := &storage.User{
