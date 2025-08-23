@@ -227,17 +227,16 @@ func TestInviteServerTransactionNoRetransmissionTCP(t *testing.T) {
 	}
 }
 
-// TestInviteClientTransactionNon2xxAck verifies that the client transaction
-// does NOT send an ACK for a non-2xx final response, as this is the
-// responsibility of the TU (and a new transaction).
-func TestInviteClientTransactionNon2xxAck(t *testing.T) {
+// TestInviteClientTransactionSendsAckForNon2xx verifies that the client transaction
+// sends an ACK for a non-2xx final response, as per RFC 3261.
+func TestInviteClientTransactionSendsAckForNon2xx(t *testing.T) {
 	// Use TCP so that Timer D is 0, allowing the transaction to terminate quickly.
 	T1 = 50 * time.Millisecond
 
 	reqStr := "INVITE sip:test SIP/2.0\r\n" +
-		"Via: SIP/2.0/TCP 1.1.1.1:5060;branch=z9hG4bK-client-no-ack\r\n" +
+		"Via: SIP/2.0/TCP 1.1.1.1:5060;branch=z9hG4bK-client-ack\r\n" +
 		"To: a\r\n" +
-		"From: b\r\n" +
+		"From: b;tag=from-tag\r\n" +
 		"CSeq: 1 INVITE\r\n" +
 		"Call-ID: 5\r\n" +
 		"Content-Length: 0\r\n\r\n"
@@ -270,9 +269,9 @@ func TestInviteClientTransactionNon2xxAck(t *testing.T) {
 		StatusCode: 401,
 		Reason:     "Unauthorized",
 		Headers: map[string]string{
-			"Via":     "SIP/2.0/TCP 1.1.1.1:5060;branch=z9hG4bK-client-no-ack",
-			"To":      "a;tag=z9hG4bK-response-tag",
-			"From":    "b",
+			"Via":     "SIP/2.0/TCP 1.1.1.1:5060;branch=z9hG4bK-client-ack",
+			"To":      "a;tag=to-tag",
+			"From":    "b;tag=from-tag",
 			"CSeq":    "1 INVITE",
 			"Call-ID": "5",
 		},
@@ -290,10 +289,23 @@ func TestInviteClientTransactionNon2xxAck(t *testing.T) {
 		t.Fatal("Transaction did not pass response to TU")
 	}
 
-	// 4. Verify that NO ACK was sent by the transaction
+	// 4. Verify that an ACK was sent by the transaction
 	sentData, ok = transport.getLastWritten(50 * time.Millisecond)
-	if ok {
-		t.Fatalf("Transaction incorrectly sent a message after receiving final response: %s", sentData)
+	if !ok {
+		t.Fatal("Transaction did not send ACK for non-2xx final response")
+	}
+	if !strings.Contains(sentData, "ACK sip:test") {
+		t.Fatalf("Transaction sent incorrect message instead of ACK: %s", sentData)
+	}
+	parsedAck, err := ParseSIPRequest(sentData)
+	if err != nil {
+		t.Fatalf("Failed to parse sent ACK: %v", err)
+	}
+	if parsedAck.GetHeader("CSeq") != "1 ACK" {
+		t.Errorf("ACK has wrong CSeq: %s", parsedAck.GetHeader("CSeq"))
+	}
+	if parsedAck.GetHeader("To") != "a;tag=to-tag" {
+		t.Errorf("ACK has wrong To header: %s", parsedAck.GetHeader("To"))
 	}
 
 	// 5. For TCP, Timer D is 0, so it should terminate very quickly.
@@ -305,9 +317,9 @@ func TestInviteClientTransactionNon2xxAck(t *testing.T) {
 	}
 }
 
-// TestInviteClientTimerARetransmission tests that Timer A continues to fire
-// after a provisional response is received.
-func TestInviteClientTimerARetransmission(t *testing.T) {
+// TestInviteClientTimerAStop tests that Timer A stops firing after a
+// provisional response is received, as per RFC 3261.
+func TestInviteClientTimerAStop(t *testing.T) {
 	T1 = 50 * time.Millisecond
 
 	reqStr := "INVITE sip:test SIP/2.0\r\n" +
@@ -330,9 +342,10 @@ func TestInviteClientTimerARetransmission(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create transaction: %v", err)
 	}
+	defer tx.Terminate()
 
-	// 1. Verify the initial INVITE was sent
-	sentData, ok := transport.getLastWritten(100 * time.Millisecond)
+	// 1. Verify the initial INVITE was sent and consume it
+	_, ok := transport.getLastWritten(100 * time.Millisecond)
 	if !ok {
 		t.Fatal("Transport did not write the initial INVITE")
 	}
@@ -351,99 +364,78 @@ func TestInviteClientTimerARetransmission(t *testing.T) {
 		t.Fatal("Transaction did not pass provisional response to TU")
 	}
 
-	// 4. Verify that the INVITE is retransmitted (Timer A is still running)
-	// Timer A fires first after T1 (50ms), then T1*2 (100ms)
-	sentData, ok = transport.getLastWritten(100 * time.Millisecond) // Wait for first retransmission
-	if !ok {
-		t.Fatal("Transport did not retransmit INVITE after provisional response")
-	}
-	if !strings.Contains(sentData, "INVITE sip:test") {
-		t.Errorf("Expected retransmitted INVITE, but got: %s", sentData)
-	}
-
-	// 5. Clean up by terminating the transaction
-	tx.Terminate()
-	select {
-	case <-tx.Done():
-	// Success
-	case <-time.After(50 * time.Millisecond):
-		t.Fatal("Transaction did not terminate")
+	// 4. Verify that the INVITE is NOT retransmitted
+	// The first retransmission would happen after T1 (50ms). We wait a bit longer.
+	sentData, ok := transport.getLastWritten(100 * time.Millisecond)
+	if ok {
+		t.Fatalf("Transport incorrectly retransmitted INVITE after provisional response: %s", sentData)
 	}
 }
 
-// TestInviteServerTransaction2xxUdpAckWait tests that for UDP, after sending
-// a 2xx response, the transaction stays alive to retransmit the response
-// and waits for the TU to terminate it (upon ACK).
-func TestInviteServerTransaction2xxUdpAckWait(t *testing.T) {
-	T1 = 50 * time.Millisecond
-
-	reqStr := "INVITE sip:test SIP/2.0\r\n" +
-		"Via: SIP/2.0/UDP 1.1.1.1:5060;branch=z9hG4bK-2xx-ack-wait\r\n" +
-		"To: a\r\n" +
-		"From: b\r\n" +
-		"CSeq: 1 INVITE\r\n" +
-		"Call-ID: 6\r\n" +
-		"Content-Length: 0\r\n\r\n"
-	req, err := ParseSIPRequest(reqStr)
-	if err != nil {
-		t.Fatalf("Failed to parse request: %v", err)
+// TestInviteServerTransactionTerminatesOn2xx tests that after sending a 2xx
+// response, the transaction terminates immediately for any transport.
+func TestInviteServerTransactionTerminatesOn2xx(t *testing.T) {
+	tests := []struct {
+		name  string
+		proto string
+	}{
+		{"UDP", "UDP"},
+		{"TCP", "TCP"},
 	}
 
-	transport := newMockPacketConn()
-	remoteAddr := &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 5060}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reqStr := "INVITE sip:test SIP/2.0\r\n" +
+				"Via: SIP/2.0/" + tt.proto + " 1.1.1.1:5060;branch=z9hG4bK-2xx-term\r\n" +
+				"To: a\r\n" +
+				"From: b\r\n" +
+				"CSeq: 1 INVITE\r\n" +
+				"Call-ID: 6\r\n" +
+				"Content-Length: 0\r\n\r\n"
+			req, err := ParseSIPRequest(reqStr)
+			if err != nil {
+				t.Fatalf("Failed to parse request: %v", err)
+			}
 
-	// Create transaction
-	tx, err := NewInviteServerTx(req, transport, remoteAddr, "UDP")
-	if err != nil {
-		t.Fatalf("Failed to create transaction: %v", err)
-	}
-	<-tx.Requests()                               // Consume request from TU
-	transport.getLastWritten(100 * time.Millisecond) // Consume the 100 Trying
+			transport := newMockPacketConn()
+			var remoteAddr net.Addr
+			if tt.proto == "UDP" {
+				remoteAddr = &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 5060}
+			} else {
+				remoteAddr = &net.TCPAddr{IP: net.ParseIP("1.1.1.1"), Port: 5060}
+			}
 
-	// TU sends a 200 OK response
-	res := BuildResponse(200, "OK", req, nil)
-	err = tx.Respond(res)
-	if err != nil {
-		t.Fatalf("TU failed to send response: %v", err)
-	}
+			// Create transaction
+			tx, err := NewInviteServerTx(req, transport, remoteAddr, tt.proto)
+			if err != nil {
+				t.Fatalf("Failed to create transaction: %v", err)
+			}
+			<-tx.Requests()                               // Consume request from TU
+			transport.getLastWritten(100 * time.Millisecond) // Consume the 100 Trying
 
-	// Check that the 200 OK was "sent"
-	sentData, ok := transport.getLastWritten(100 * time.Millisecond)
-	if !ok {
-		t.Fatal("Transport did not write 200 OK response")
-	}
-	if !strings.Contains(sentData, "SIP/2.0 200 OK") {
-		t.Errorf("Expected 200 OK, but got: %s", sentData)
-	}
+			// TU sends a 200 OK response
+			res := BuildResponse(200, "OK", req, nil)
+			err = tx.Respond(res)
+			if err != nil {
+				t.Fatalf("TU failed to send response: %v", err)
+			}
 
-	// Transaction should NOT be terminated yet
-	select {
-	case <-tx.Done():
-		t.Fatal("Transaction terminated prematurely for UDP 2xx response")
-	case <-time.After(50 * time.Millisecond):
-		// This is expected, continue
-	}
+			// Check that the 200 OK was "sent"
+			sentData, ok := transport.getLastWritten(100 * time.Millisecond)
+			if !ok {
+				t.Fatal("Transport did not write 200 OK response")
+			}
+			if !strings.Contains(sentData, "SIP/2.0 200 OK") {
+				t.Errorf("Expected 200 OK, but got: %s", sentData)
+			}
 
-	// Simulate a retransmitted INVITE from the client
-	tx.Receive(req)
-
-	// Check that the 200 OK was re-sent
-	sentData, ok = transport.getLastWritten(100 * time.Millisecond)
-	if !ok {
-		t.Fatal("Transport did not retransmit 200 OK response")
-	}
-	if !strings.Contains(sentData, "SIP/2.0 200 OK") {
-		t.Errorf("Expected retransmitted 200 OK, but got: %s", sentData)
-	}
-
-	// Now, simulate the TU terminating the transaction (e.g. after receiving ACK)
-	tx.Terminate()
-
-	// Transaction should now be terminated
-	select {
-	case <-tx.Done():
-		// Success
-	case <-time.After(50 * time.Millisecond):
-		t.Fatal("Transaction did not terminate after explicit call")
+			// Transaction should be terminated now for any transport
+			select {
+			case <-tx.Done():
+				// Success
+			case <-time.After(50 * time.Millisecond):
+				t.Fatalf("Transaction did not terminate immediately after 2xx response on %s", tt.proto)
+			}
+		})
 	}
 }

@@ -367,19 +367,11 @@ func (tx *InviteServerTx) run() {
 			switch {
 			case res.StatusCode >= 101 && res.StatusCode < 200:
 			case res.StatusCode >= 200 && res.StatusCode < 300:
-				// For reliable transports, terminate immediately.
-				if strings.ToUpper(tx.proto) == "TCP" {
-					tx.mu.Unlock()
-					tx.Terminate()
-					return
-				}
-				// For unreliable transports, stay alive to handle retransmits of the INVITE
-				// and is terminated by the TU upon receipt of an ACK. We set a timer to
-				// prevent resource leaks if an ACK never arrives.
-				tx.timerH = time.AfterFunc(64*T1, func() {
-					log.Printf("INVITE server transaction %s timed out waiting for ACK for 2xx response.", tx.id)
-					tx.Terminate()
-				})
+				// Per RFC 3261 Section 17.2.1, the transaction terminates immediately after
+				// passing a 2xx response to the transport. The TU is responsible for retransmissions.
+				tx.mu.Unlock()
+				tx.Terminate()
+				return
 			case res.StatusCode >= 300 && res.StatusCode < 700:
 				tx.state = TxStateCompleted
 				tx.startTimerG()
@@ -615,8 +607,10 @@ func (tx *InviteClientTx) ReceiveResponse(res *SIPResponse) {
 	if res.StatusCode >= 100 && res.StatusCode < 200 {
 		if tx.state == TxStateCalling {
 			tx.state = TxStateProceeding
-			// Timer A should not be stopped on provisional responses.
-			// It continues until a final response is received.
+			// Per RFC 3261 Section 17.1.1.2, stop retransmitting on provisional response.
+			if tx.timerA != nil {
+				tx.timerA.Stop()
+			}
 		}
 		sendResponseToTU(res)
 		return
@@ -626,19 +620,17 @@ func (tx *InviteClientTx) ReceiveResponse(res *SIPResponse) {
 		if tx.state == TxStateCalling || tx.state == TxStateProceeding {
 			tx.state = TxStateCompleted
 			sendResponseToTU(res)
-			// Per RFC 3261 Section 17.1.1.3, the UAC core generates the ACK for a
-			// non-2xx response, not the client transaction. The transaction's
-			// job is to pass the response to the TU and then terminate.
+			tx.sendAck(res) // Send ACK for non-2xx final response
 			// Timer D value depends on transport. For reliable transport, it's 0.
 			timerDVal := 32 * time.Second
 			if strings.ToUpper(tx.proto) == "TCP" {
 				timerDVal = 0
 			}
 			tx.timerD = time.AfterFunc(timerDVal, tx.Terminate)
+		} else if tx.state == TxStateCompleted {
+			// Retransmission of the final response. The transaction re-sends the ACK.
+			tx.sendAck(res)
 		}
-		// If a retransmission of the final response is received in the "Completed"
-		// state, the transaction does nothing; it just lets Timer D fire. The TU
-		// is responsible for generating the ACK.
 		return
 	}
 
@@ -647,6 +639,16 @@ func (tx *InviteClientTx) ReceiveResponse(res *SIPResponse) {
 			tx.state = TxStateTerminated
 			sendResponseToTU(res)
 		}
+	}
+}
+
+func (tx *InviteClientTx) sendAck(res *SIPResponse) {
+	ack := BuildAck(res, tx.request)
+	log.Printf("TX %s: Sending ACK for non-2xx final response:\n%s", tx.id, ack.String())
+	_, err := tx.transport.WriteTo([]byte(ack.String()), tx.destAddr)
+	if err != nil {
+		log.Printf("TX %s: transport error sending ACK: %v", tx.id, err)
+		tx.Terminate()
 	}
 }
 
@@ -669,9 +671,8 @@ func (tx *InviteClientTx) startTimerA(interval time.Duration) {
 	tx.timerA = time.AfterFunc(interval, func() {
 		tx.mu.Lock()
 		defer tx.mu.Unlock()
-		// Keep retransmitting until a final response is received (which moves the
-		// state to Completed or Terminated).
-		if tx.state != TxStateCalling && tx.state != TxStateProceeding {
+		// Per RFC, retransmissions are only sent in the "Calling" state.
+		if tx.state != TxStateCalling {
 			return
 		}
 

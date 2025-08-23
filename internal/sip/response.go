@@ -61,3 +61,34 @@ func BuildResponse(statusCode int, statusText string, req *SIPRequest, extraHead
 
 	return resp
 }
+
+// BuildAck creates an ACK request for a given final response to an INVITE.
+// Per RFC 3261, the ACK for a 2xx response is a separate transaction, but for
+// a non-2xx response, it's part of the same transaction.
+func BuildAck(res *SIPResponse, originalReq *SIPRequest) *SIPRequest {
+	ack := &SIPRequest{
+		Method: "ACK",
+		URI:    originalReq.URI,
+		Proto:  originalReq.Proto,
+		Headers: map[string]string{
+			// The Via header field in the ACK MUST be the same as the top Via
+			// header field of the original request.
+			"Via":          originalReq.GetHeader("Via"),
+			// The To header field in the ACK MUST equal the To header field in the
+			// response being acknowledged.
+			"To":           res.Headers["To"],
+			"From":         originalReq.GetHeader("From"),
+			"Call-ID":      originalReq.GetHeader("Call-ID"),
+			"CSeq":         strings.Split(originalReq.GetHeader("CSeq"), " ")[0] + " ACK",
+			"Max-Forwards": "70",
+		},
+		Body: []byte{},
+	}
+
+	// Copy Route headers if they were in the original INVITE
+	if route := originalReq.GetHeader("Route"); route != "" {
+		ack.Headers["Route"] = route
+	}
+
+	return ack
+}
