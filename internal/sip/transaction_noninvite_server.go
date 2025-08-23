@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"strings"
 	"sync"
 	"time"
 )
@@ -123,7 +122,7 @@ func (tx *NonInviteServerTx) run() {
 			if res.StatusCode >= 200 {
 				tx.state = TxStateCompleted
 				// For reliable transports, terminate immediately. For unreliable, start Timer J.
-				if strings.ToUpper(tx.proto) == "TCP" {
+				if isReliable(tx.proto) {
 					tx.mu.Unlock() // Unlock before calling Terminate
 					tx.Terminate()
 					return // End the goroutine

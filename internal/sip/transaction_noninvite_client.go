@@ -3,7 +3,6 @@ package sip
 import (
 	"log"
 	"net"
-	"strings"
 	"sync"
 	"time"
 )
@@ -64,8 +63,10 @@ func (tx *NonInviteClientTx) Terminate() {
 
 func (tx *NonInviteClientTx) ReceiveResponse(res *SIPResponse) {
 	tx.mu.Lock()
-	defer tx.mu.Unlock()
-	if tx.state == TxStateTerminated || tx.state == TxStateCompleted { return }
+	if tx.state == TxStateTerminated || tx.state == TxStateCompleted {
+		tx.mu.Unlock()
+		return
+	}
 
 	sendResponseToTU := func(r *SIPResponse) {
 		select {
@@ -78,12 +79,22 @@ func (tx *NonInviteClientTx) ReceiveResponse(res *SIPResponse) {
 	sendResponseToTU(res)
 	if res.StatusCode >= 200 {
 		tx.state = TxStateCompleted
-		if tx.timerE != nil { tx.timerE.Stop() }
-		if tx.timerF != nil { tx.timerF.Stop() }
+		if tx.timerE != nil {
+			tx.timerE.Stop()
+		}
+		if tx.timerF != nil {
+			tx.timerF.Stop()
+		}
+		if isReliable(tx.proto) {
+			tx.mu.Unlock()
+			tx.Terminate()
+			return
+		}
 		tx.timerK = time.AfterFunc(T4, tx.Terminate)
 	} else {
 		tx.state = TxStateProceeding
 	}
+	tx.mu.Unlock()
 }
 
 func (tx *NonInviteClientTx) run() {
@@ -99,7 +110,7 @@ func (tx *NonInviteClientTx) run() {
 }
 
 func (tx *NonInviteClientTx) startTimerE(interval time.Duration) {
-	if strings.ToUpper(tx.proto) == "TCP" {
+	if isReliable(tx.proto) {
 		return // Do not retransmit requests over reliable transport
 	}
 	tx.timerE = time.AfterFunc(interval, func() {

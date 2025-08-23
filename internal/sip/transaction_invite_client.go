@@ -3,7 +3,6 @@ package sip
 import (
 	"log"
 	"net"
-	"strings"
 	"sync"
 	"time"
 )
@@ -64,9 +63,9 @@ func (tx *InviteClientTx) Terminate() {
 
 func (tx *InviteClientTx) ReceiveResponse(res *SIPResponse) {
 	tx.mu.Lock()
-	defer tx.mu.Unlock()
 
 	if tx.state == TxStateTerminated {
+		tx.mu.Unlock()
 		return
 	}
 
@@ -87,6 +86,7 @@ func (tx *InviteClientTx) ReceiveResponse(res *SIPResponse) {
 			}
 		}
 		sendResponseToTU(res)
+		tx.mu.Unlock()
 		return
 	}
 
@@ -95,16 +95,17 @@ func (tx *InviteClientTx) ReceiveResponse(res *SIPResponse) {
 			tx.state = TxStateCompleted
 			sendResponseToTU(res)
 			tx.sendAck(res) // Send ACK for non-2xx final response
-			// Timer D value depends on transport. For reliable transport, it's 0.
-			timerDVal := 32 * time.Second
-			if strings.ToUpper(tx.proto) == "TCP" {
-				timerDVal = 0
+			if isReliable(tx.proto) {
+				tx.mu.Unlock()
+				tx.Terminate()
+				return
 			}
-			tx.timerD = time.AfterFunc(timerDVal, tx.Terminate)
+			tx.timerD = time.AfterFunc(32*time.Second, tx.Terminate)
 		} else if tx.state == TxStateCompleted {
 			// Retransmission of the final response. The transaction re-sends the ACK.
 			tx.sendAck(res)
 		}
+		tx.mu.Unlock()
 		return
 	}
 
@@ -112,8 +113,14 @@ func (tx *InviteClientTx) ReceiveResponse(res *SIPResponse) {
 		if tx.state == TxStateCalling || tx.state == TxStateProceeding {
 			tx.state = TxStateTerminated
 			sendResponseToTU(res)
+			// No need to unlock, Terminate will be called by run() which will unlock.
+			// However, direct call to Terminate is better. Let's unlock and terminate.
+			tx.mu.Unlock()
+			tx.Terminate()
+			return
 		}
 	}
+	tx.mu.Unlock()
 }
 
 func (tx *InviteClientTx) sendAck(res *SIPResponse) {
@@ -139,7 +146,7 @@ func (tx *InviteClientTx) run() {
 }
 
 func (tx *InviteClientTx) startTimerA(interval time.Duration) {
-	if strings.ToUpper(tx.proto) == "TCP" {
+	if isReliable(tx.proto) {
 		return // Do not retransmit INVITE over reliable transport
 	}
 	tx.timerA = time.AfterFunc(interval, func() {
