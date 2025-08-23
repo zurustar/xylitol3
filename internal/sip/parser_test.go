@@ -53,6 +53,28 @@ func TestParseSIPRequest(t *testing.T) {
 		}
 	})
 
+	t.Run("Valid REGISTER with whitespace in Auth header", func(t *testing.T) {
+		rawReq := "REGISTER sip:registrar.example.com SIP/2.0\r\n" +
+			"Authorization: Digest username = \"alice\", realm = \"registrar.example.com\", nonce = \"dcd98b7102dd2f0e8b11d0f600bfb0c093\", uri = \"sip:registrar.example.com\", response = \"6629fae49393a053974507c4ef1\"\r\n" +
+			"Content-Length: 0\r\n\r\n"
+
+		req, err := ParseSIPRequest(rawReq)
+		if err != nil {
+			t.Fatalf("ParseSIPRequest failed: %v", err)
+		}
+
+		expectedAuth := map[string]string{
+			"username": "alice",
+			"realm":    "registrar.example.com",
+			"nonce":    "dcd98b7102dd2f0e8b11d0f600bfb0c093",
+			"uri":      "sip:registrar.example.com",
+			"response": "6629fae49393a053974507c4ef1",
+		}
+		if !reflect.DeepEqual(req.Authorization, expectedAuth) {
+			t.Errorf("Authorization header parsed incorrectly.\nExpected: %v\nGot:      %v", expectedAuth, req.Authorization)
+		}
+	})
+
 	t.Run("Malformed request line", func(t *testing.T) {
 		rawReq := "REGISTER sip:registrar.example.com\r\n"
 		_, err := ParseSIPRequest(rawReq)
