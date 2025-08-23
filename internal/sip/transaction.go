@@ -617,16 +617,19 @@ func (tx *InviteClientTx) ReceiveResponse(res *SIPResponse) {
 		if tx.state == TxStateCalling || tx.state == TxStateProceeding {
 			tx.state = TxStateCompleted
 			sendResponseToTU(res)
-			tx.sendAck(res)
+			// Per RFC 3261 Section 17.1.1.3, the UAC core generates the ACK for a
+			// non-2xx response, not the client transaction. The transaction's
+			// job is to pass the response to the TU and then terminate.
 			// Timer D value depends on transport. For reliable transport, it's 0.
 			timerDVal := 32 * time.Second
 			if strings.ToUpper(tx.proto) == "TCP" {
 				timerDVal = 0
 			}
 			tx.timerD = time.AfterFunc(timerDVal, tx.Terminate)
-		} else if tx.state == TxStateCompleted {
-			tx.sendAck(res)
 		}
+		// If a retransmission of the final response is received in the "Completed"
+		// state, the transaction does nothing; it just lets Timer D fire. The TU
+		// is responsible for generating the ACK.
 		return
 	}
 
@@ -662,31 +665,6 @@ func (tx *InviteClientTx) startTimerA(interval time.Duration) {
 		tx.sendRequest()
 		tx.startTimerA(interval * 2)
 	})
-}
-
-func (tx *InviteClientTx) sendAck(res *SIPResponse) {
-	ackReq := &SIPRequest{
-		Method:  "ACK",
-		URI:     tx.request.URI,
-		Proto:   tx.request.Proto,
-		Headers: make(map[string]string),
-		Body:    []byte{},
-	}
-	topVia, _ := tx.request.TopVia()
-	ackReq.Headers["Via"] = fmt.Sprintf("%s %s:%s;branch=%s", topVia.Proto, topVia.Host, topVia.Port, topVia.Branch())
-	ackReq.Headers["From"] = tx.request.GetHeader("From")
-	ackReq.Headers["To"] = res.Headers["To"]
-	ackReq.Headers["Call-ID"] = tx.request.GetHeader("Call-ID")
-	cseqParts := strings.Fields(tx.request.GetHeader("CSeq"))
-	if len(cseqParts) == 2 {
-		ackReq.Headers["CSeq"] = fmt.Sprintf("%s ACK", cseqParts[0])
-	}
-
-	log.Printf("TX %s: Sending ACK for non-2xx final response", tx.id)
-	_, err := tx.transport.WriteTo([]byte(ackReq.String()), tx.destAddr)
-	if err != nil {
-		log.Printf("TX %s: transport error sending ACK: %v", tx.id, err)
-	}
 }
 
 func (tx *InviteClientTx) sendRequest() {

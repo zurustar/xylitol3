@@ -226,3 +226,81 @@ func TestInviteServerTransactionNoRetransmissionTCP(t *testing.T) {
 		t.Fatalf("Transport retransmitted response over TCP: %s", sentData)
 	}
 }
+
+// TestInviteClientTransactionNon2xxAck verifies that the client transaction
+// does NOT send an ACK for a non-2xx final response, as this is the
+// responsibility of the TU (and a new transaction).
+func TestInviteClientTransactionNon2xxAck(t *testing.T) {
+	// Use TCP so that Timer D is 0, allowing the transaction to terminate quickly.
+	T1 = 50 * time.Millisecond
+
+	reqStr := "INVITE sip:test SIP/2.0\r\n" +
+		"Via: SIP/2.0/TCP 1.1.1.1:5060;branch=z9hG4bK-client-no-ack\r\n" +
+		"To: a\r\n" +
+		"From: b\r\n" +
+		"CSeq: 1 INVITE\r\n" +
+		"Call-ID: 5\r\n" +
+		"Content-Length: 0\r\n\r\n"
+	req, err := ParseSIPRequest(reqStr)
+	if err != nil {
+		t.Fatalf("Failed to parse request: %v", err)
+	}
+
+	transport := newMockPacketConn()
+	remoteAddr := &net.TCPAddr{IP: net.ParseIP("2.2.2.2"), Port: 5060}
+
+	// Create the client transaction
+	tx, err := NewInviteClientTx(req, transport, remoteAddr, "TCP")
+	if err != nil {
+		t.Fatalf("Failed to create transaction: %v", err)
+	}
+
+	// 1. Verify the initial INVITE was sent
+	sentData, ok := transport.getLastWritten(100 * time.Millisecond)
+	if !ok {
+		t.Fatal("Transport did not write the initial INVITE")
+	}
+	if !strings.Contains(sentData, "INVITE sip:test") {
+		t.Errorf("Expected INVITE, but got: %s", sentData)
+	}
+
+	// 2. Simulate receiving a 401 Unauthorized response
+	res := &SIPResponse{
+		Proto:      "SIP/2.0",
+		StatusCode: 401,
+		Reason:     "Unauthorized",
+		Headers: map[string]string{
+			"Via":     "SIP/2.0/TCP 1.1.1.1:5060;branch=z9hG4bK-client-no-ack",
+			"To":      "a;tag=z9hG4bK-response-tag",
+			"From":    "b",
+			"CSeq":    "1 INVITE",
+			"Call-ID": "5",
+		},
+		Body: []byte{},
+	}
+	tx.ReceiveResponse(res)
+
+	// 3. Verify the response was passed to the TU
+	select {
+	case tuRes := <-tx.Responses():
+		if tuRes.StatusCode != 401 {
+			t.Errorf("Expected status 401 from TU, got %d", tuRes.StatusCode)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("Transaction did not pass response to TU")
+	}
+
+	// 4. Verify that NO ACK was sent by the transaction
+	sentData, ok = transport.getLastWritten(50 * time.Millisecond)
+	if ok {
+		t.Fatalf("Transaction incorrectly sent a message after receiving final response: %s", sentData)
+	}
+
+	// 5. For TCP, Timer D is 0, so it should terminate very quickly.
+	select {
+	case <-tx.Done():
+		// Success
+	case <-time.After(50 * time.Millisecond):
+		t.Fatal("Transaction did not terminate after non-2xx final response")
+	}
+}
