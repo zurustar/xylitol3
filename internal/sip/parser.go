@@ -16,9 +16,66 @@ type SIPRequest struct {
 	Body          []byte
 }
 
+// SIPURI represents a parsed SIP URI.
+type SIPURI struct {
+	Scheme string // e.g., "sip"
+	User   string
+	Host   string
+	Port   string
+}
+
+// ParseSIPURI parses a SIP URI string into a SIPURI struct.
+// It handles URIs in the format: <sip:user@host:port> or sip:user@host
+func ParseSIPURI(uri string) (*SIPURI, error) {
+	uri = strings.Trim(uri, "<>") // Remove angle brackets
+
+	parts := strings.SplitN(uri, ":", 2)
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("invalid URI format: %s", uri)
+	}
+
+	s := &SIPURI{Scheme: parts[0]}
+	remaining := parts[1]
+
+	userHostPort := strings.SplitN(remaining, "@", 2)
+	if len(userHostPort) == 2 {
+		s.User = userHostPort[0]
+		remaining = userHostPort[1]
+	}
+
+	hostPort := strings.SplitN(remaining, ":", 2)
+	s.Host = hostPort[0]
+	if len(hostPort) == 2 {
+		s.Port = hostPort[1]
+	}
+
+	if s.Host == "" {
+		return nil, fmt.Errorf("host is missing in URI: %s", uri)
+	}
+
+	return s, nil
+}
+
 // GetHeader returns the value of a header, case-insensitively.
 func (r *SIPRequest) GetHeader(name string) string {
 	return r.Headers[strings.Title(name)]
+}
+
+// GetSIPURIHeader parses a header that is expected to contain a SIP URI.
+func (r *SIPRequest) GetSIPURIHeader(name string) (*SIPURI, error) {
+	headerValue := r.GetHeader(name)
+	if headerValue == "" {
+		return nil, fmt.Errorf("header '%s' not found", name)
+	}
+	// The value might be just the URI, or it might have a display name like "Bob" <sip:bob@host>
+	// We'll look for the angle brackets first.
+	start := strings.Index(headerValue, "<")
+	end := strings.Index(headerValue, ">")
+	if start != -1 && end != -1 && end > start {
+		headerValue = headerValue[start : end+1]
+	}
+
+	return ParseSIPURI(headerValue)
 }
 
 // ParseSIPRequest parses a raw SIP request from a string.
