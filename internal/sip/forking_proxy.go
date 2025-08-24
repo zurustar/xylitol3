@@ -1,8 +1,11 @@
 package sip
 
 import (
+	"fmt"
 	"log"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -10,10 +13,13 @@ import (
 // ForkingProxy manages the state for a forked SIP request. It creates and
 // manages multiple client transactions and aggregates their responses.
 type ForkingProxy struct {
+	s                   *SIPServer
 	upstreamTx          ServerTransaction
 	clientTxs           []ClientTransaction
 	responses           chan *SIPResponse
 	done                chan bool
+	quit                chan struct{}
+	quitOnce            sync.Once
 	mu                  sync.Mutex
 	best                *SIPResponse
 	finishOnce          sync.Once
@@ -21,12 +27,14 @@ type ForkingProxy struct {
 }
 
 // NewForkingProxy creates a new ForkingProxy.
-func NewForkingProxy(upstreamTx ServerTransaction) *ForkingProxy {
+func NewForkingProxy(s *SIPServer, upstreamTx ServerTransaction) *ForkingProxy {
 	return &ForkingProxy{
+		s:          s,
 		upstreamTx: upstreamTx,
 		clientTxs:  make([]ClientTransaction, 0),
 		responses:  make(chan *SIPResponse, 10), // Buffered channel
 		done:       make(chan bool),
+		quit:       make(chan struct{}),
 	}
 }
 
@@ -84,7 +92,7 @@ func (p *ForkingProxy) Run(s *SIPServer) {
 
 	// Main loop to process responses as they arrive.
 	for res := range p.responses {
-		if p.processResponse(res) {
+		if p.processResponse(res, p.s, &wg) {
 			// A final response (2xx) was chosen, so we can exit early.
 			break
 		}
@@ -115,9 +123,15 @@ func (p *ForkingProxy) listenToBranch(tx ClientTransaction, wg *sync.WaitGroup) 
 				// Forward provisional responses upstream immediately.
 				p.upstreamTx.Respond(res)
 			} else {
-				p.responses <- res
+				select {
+				case p.responses <- res:
+				case <-p.quit:
+					return
+				}
 			}
 		case <-tx.Done():
+			return
+		case <-p.quit:
 			return
 		case <-timerC.C:
 			if isInvite {
@@ -131,18 +145,94 @@ func (p *ForkingProxy) listenToBranch(tx ClientTransaction, wg *sync.WaitGroup) 
 
 // processResponse handles a single response from a branch.
 // It returns true if a final response has been selected and forwarded.
-func (p *ForkingProxy) processResponse(res *SIPResponse) bool {
+func (p *ForkingProxy) processResponse(res *SIPResponse, s *SIPServer, wg *sync.WaitGroup) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	if p.best != nil && p.best.StatusCode >= 200 {
-		return true
+		return true // Already have a final response, do nothing.
 	}
 
+	// Handle session timer negotiation (RFC 4028, Section 8.1.1)
+	if res.StatusCode == 422 {
+		originalReq := p.upstreamTx.OriginalRequest()
+		if originalReq.Method == "INVITE" && strings.Contains(originalReq.GetHeader("Supported"), "timer") {
+			if minSE, err := res.MinSE(); err == nil && minSE > 0 {
+				log.Printf("ForkingProxy: Received 422 with Min-SE %d, attempting retry for %s.", minSE, p.upstreamTx.ID())
+
+				via, err := res.TopVia()
+				if err != nil {
+					log.Printf("ForkingProxy: Could not parse Via from 422 response for %s: %v", p.upstreamTx.ID(), err)
+				} else {
+					branchID := via.Branch()
+					var branchTx ClientTransaction
+					for _, tx := range p.clientTxs {
+						if tx.ID() == branchID {
+							branchTx = tx
+							break
+						}
+					}
+
+					if branchTx != nil {
+						retryReq := branchTx.OriginalRequest().Clone()
+						cseqStr := retryReq.GetHeader("CSeq")
+						if parts := strings.Fields(cseqStr); len(parts) == 2 {
+							if cseq, err := strconv.Atoi(parts[0]); err == nil {
+								retryReq.Headers["CSeq"] = fmt.Sprintf("%d %s", cseq+1, parts[1])
+							}
+						}
+						retryReq.Headers["Session-Expires"] = strconv.Itoa(minSE)
+						retryReq.Headers["Min-SE"] = strconv.Itoa(minSE)
+						// The original request's Via is still on top, we need to remove it before sending.
+						// The server will add its own Via. This is a bit of a hack.
+						// A better implementation would have the transaction layer handle Vias.
+						// For now, we'll just create a new client transaction.
+
+						newClientTx, err := s.NewClientTx(retryReq, branchTx.Transport())
+						if err != nil {
+							log.Printf("ForkingProxy: Failed to create new client transaction for retry: %v", err)
+							// Fallback to treating 422 as a generic error
+							goto generic_error_handling
+						}
+						p.clientTxs = append(p.clientTxs, newClientTx)
+						wg.Add(1)
+						go p.listenToBranch(newClientTx, wg)
+
+						log.Printf("ForkingProxy: Spawned new branch %s for session timer retry.", newClientTx.ID())
+						return false // Don't treat 422 as a final response, wait for the new branch.
+					}
+				}
+			}
+		}
+	}
+
+generic_error_handling:
 	if res.StatusCode >= 200 && res.StatusCode < 300 {
 		log.Printf("ForkingProxy: Received 2xx response for tx %s. This is the one!", p.upstreamTx.ID())
 		p.best = res
+
+		// Session Timer: UAS Does Not Support Timers (RFC 4028 Section 8.1.2)
+		// If the original request wanted a timer, but the 2xx response doesn't have one,
+		// the proxy MUST insert it.
+		originalReq := p.upstreamTx.OriginalRequest()
+		if se, _ := originalReq.SessionExpires(); se != nil { // Timer was requested
+			if resSE, _ := p.best.SessionExpires(); resSE == nil { // Timer not in 2xx response
+				log.Printf("ForkingProxy: UAS did not include Session-Expires in 2xx. Adding it now for tx %s.", p.upstreamTx.ID())
+				// The proxy becomes the refresher, on behalf of the UAC.
+				p.best.Headers["Session-Expires"] = fmt.Sprintf("%d;refresher=uac", se.Delta)
+				// The proxy MUST also add a Require header.
+				if existing, ok := p.best.Headers["Require"]; ok {
+					p.best.Headers["Require"] = "timer, " + existing
+				} else {
+					p.best.Headers["Require"] = "timer"
+				}
+			}
+		}
+
 		p.upstreamTx.Respond(p.best)
+		p.quitOnce.Do(func() {
+			close(p.quit)
+		})
 		close(p.responses) // Signal the main loop to stop and trigger cancellation.
 		return true
 	}
@@ -158,6 +248,10 @@ func (p *ForkingProxy) processResponse(res *SIPResponse) bool {
 
 // finish is called when all branches have terminated or a 2xx was received.
 func (p *ForkingProxy) finish() {
+	p.quitOnce.Do(func() {
+		close(p.quit)
+	})
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
