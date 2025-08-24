@@ -2,7 +2,6 @@ package sip
 
 import (
 	"log"
-	"net"
 	"sync"
 	"time"
 )
@@ -28,12 +27,10 @@ type NonInviteClientTx struct {
 	timerK    *time.Timer
 	done      chan bool
 	responses chan *SIPResponse
-	transport net.PacketConn
-	destAddr  net.Addr
-	proto     string
+	transport Transport
 }
 
-func NewNonInviteClientTx(req *SIPRequest, transport net.PacketConn, dest net.Addr, proto string) (ClientTransaction, error) {
+func NewNonInviteClientTx(req *SIPRequest, transport Transport) (ClientTransaction, error) {
 	topVia, err := req.TopVia()
 	if err != nil {
 		return nil, err
@@ -45,8 +42,6 @@ func NewNonInviteClientTx(req *SIPRequest, transport net.PacketConn, dest net.Ad
 		done:      make(chan bool),
 		responses: make(chan *SIPResponse, 1),
 		transport: transport,
-		destAddr:  dest,
-		proto:     proto,
 	}
 	go tx.run()
 	return tx, nil
@@ -56,6 +51,10 @@ func (tx *NonInviteClientTx) ID() string { return tx.id }
 func (tx *NonInviteClientTx) Done() <-chan bool { return tx.done }
 func (tx *NonInviteClientTx) Responses() <-chan *SIPResponse { return tx.responses }
 func (tx *NonInviteClientTx) OriginalRequest() *SIPRequest { return tx.request }
+
+func (tx *NonInviteClientTx) Transport() Transport {
+	return tx.transport
+}
 
 func (tx *NonInviteClientTx) Terminate() {
 	tx.mu.Lock()
@@ -96,7 +95,7 @@ func (tx *NonInviteClientTx) ReceiveResponse(res *SIPResponse) {
 		if tx.timerF != nil {
 			tx.timerF.Stop()
 		}
-		if isReliable(tx.proto) {
+		if isReliable(tx.transport.GetProto()) {
 			tx.mu.Unlock()
 			tx.Terminate()
 			return
@@ -121,7 +120,7 @@ func (tx *NonInviteClientTx) run() {
 }
 
 func (tx *NonInviteClientTx) startTimerE(interval time.Duration) {
-	if isReliable(tx.proto) {
+	if isReliable(tx.transport.GetProto()) {
 		return // Do not retransmit requests over reliable transport
 	}
 	tx.timerE = time.AfterFunc(interval, func() {
@@ -141,7 +140,7 @@ func (tx *NonInviteClientTx) startTimerE(interval time.Duration) {
 
 func (tx *NonInviteClientTx) sendRequest() {
 	log.Printf("TX %s: Sending request:\n%s", tx.id, tx.request.String())
-	_, err := tx.transport.WriteTo([]byte(tx.request.String()), tx.destAddr)
+	_, err := tx.transport.Write([]byte(tx.request.String()))
 	if err != nil {
 		log.Printf("TX %s: transport error sending request: %v", tx.id, err)
 		tx.responses <- &SIPResponse{StatusCode: 503, Reason: "Service Unavailable"}

@@ -25,10 +25,10 @@ func TestNonInviteServerTransactionHappyPath(t *testing.T) {
 		t.Fatalf("Failed to parse request: %v", err)
 	}
 
-	transport := newMockPacketConn()
 	remoteAddr := &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 5060}
+	transport := newMockTransport("UDP", remoteAddr)
 
-	tx, err := NewNonInviteServerTx(req, transport, remoteAddr, "UDP")
+	tx, err := NewNonInviteServerTx(req, transport)
 	if err != nil {
 		t.Fatalf("Failed to create transaction: %v", err)
 	}
@@ -82,11 +82,11 @@ func TestInviteServerTransactionAckFlow(t *testing.T) {
 		t.Fatalf("Failed to parse request: %v", err)
 	}
 
-	transport := newMockPacketConn()
 	remoteAddr := &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 5060}
+	transport := newMockTransport("UDP", remoteAddr)
 
 	// Create transaction
-	tx, err := NewInviteServerTx(req, transport, remoteAddr, "UDP")
+	tx, err := NewInviteServerTx(req, transport)
 	if err != nil {
 		t.Fatalf("Failed to create transaction: %v", err)
 	}
@@ -166,10 +166,10 @@ func TestInviteServerTransactionAckFlowReliable(t *testing.T) {
 				t.Fatalf("Failed to parse request: %v", err)
 			}
 
-			transport := newMockPacketConn()
 			remoteAddr := &net.TCPAddr{IP: net.ParseIP("1.1.1.1"), Port: 5060}
+			transport := newMockTransport(tt.proto, remoteAddr)
 
-			tx, err := NewInviteServerTx(req, transport, remoteAddr, tt.proto)
+			tx, err := NewInviteServerTx(req, transport)
 			if err != nil {
 				t.Fatalf("Failed to create transaction: %v", err)
 			}
@@ -229,10 +229,10 @@ func TestNonInviteServerTransactionReliable(t *testing.T) {
 				t.Fatalf("Failed to parse request: %v", err)
 			}
 
-			transport := newMockPacketConn()
 			remoteAddr := &net.TCPAddr{IP: net.ParseIP("1.1.1.1"), Port: 5060}
+			transport := newMockTransport(tt.proto, remoteAddr)
 
-			tx, err := NewNonInviteServerTx(req, transport, remoteAddr, tt.proto)
+			tx, err := NewNonInviteServerTx(req, transport)
 			if err != nil {
 				t.Fatalf("Failed to create transaction: %v", err)
 			}
@@ -281,10 +281,10 @@ func TestInviteServerTransactionNoRetransmissionReliable(t *testing.T) {
 				t.Fatalf("Failed to parse request: %v", err)
 			}
 
-			transport := newMockPacketConn()
 			remoteAddr := &net.TCPAddr{IP: net.ParseIP("1.1.1.1"), Port: 5060}
+			transport := newMockTransport(tt.proto, remoteAddr)
 
-			tx, err := NewInviteServerTx(req, transport, remoteAddr, tt.proto)
+			tx, err := NewInviteServerTx(req, transport)
 			if err != nil {
 				t.Fatalf("Failed to create transaction: %v", err)
 			}
@@ -338,9 +338,9 @@ func TestInviteClientTransactionSendsAckForNon2xxReliable(t *testing.T) {
 				t.Fatalf("Failed to parse request: %v", err)
 			}
 
-			transport := newMockPacketConn()
 			remoteAddr := &net.TCPAddr{IP: net.ParseIP("2.2.2.2"), Port: 5060}
-			tx, err := NewInviteClientTx(req, transport, remoteAddr, tt.proto)
+			transport := newMockTransport(tt.proto, remoteAddr)
+			tx, err := NewInviteClientTx(req, transport)
 			if err != nil {
 				t.Fatalf("Failed to create transaction: %v", err)
 			}
@@ -394,11 +394,11 @@ func TestInviteClientTimerAStop(t *testing.T) {
 		t.Fatalf("Failed to parse request: %v", err)
 	}
 
-	transport := newMockPacketConn()
 	remoteAddr := &net.UDPAddr{IP: net.ParseIP("2.2.2.2"), Port: 5060}
+	transport := newMockTransport("UDP", remoteAddr)
 
 	// Create the client transaction
-	tx, err := NewInviteClientTx(req, transport, remoteAddr, "UDP")
+	tx, err := NewInviteClientTx(req, transport)
 	if err != nil {
 		t.Fatalf("Failed to create transaction: %v", err)
 	}
@@ -457,9 +457,9 @@ func TestNonInviteClientTransactionReliable(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Failed to parse request: %v", err)
 			}
-			transport := newMockPacketConn()
 			remoteAddr := &net.TCPAddr{IP: net.ParseIP("2.2.2.2"), Port: 5060}
-			tx, err := NewNonInviteClientTx(req, transport, remoteAddr, tt.proto)
+			transport := newMockTransport(tt.proto, remoteAddr)
+			tx, err := NewNonInviteClientTx(req, transport)
 			if err != nil {
 				t.Fatalf("Failed to create transaction: %v", err)
 			}
@@ -502,16 +502,16 @@ func TestInviteServerTransactionTerminatesOn2xx(t *testing.T) {
 				t.Fatalf("Failed to parse request: %v", err)
 			}
 
-			transport := newMockPacketConn()
 			var remoteAddr net.Addr
 			if tt.proto == "UDP" {
 				remoteAddr = &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 5060}
 			} else {
 				remoteAddr = &net.TCPAddr{IP: net.ParseIP("1.1.1.1"), Port: 5060}
 			}
+			transport := newMockTransport(tt.proto, remoteAddr)
 
 			// Create transaction
-			tx, err := NewInviteServerTx(req, transport, remoteAddr, tt.proto)
+			tx, err := NewInviteServerTx(req, transport)
 			if err != nil {
 				t.Fatalf("Failed to create transaction: %v", err)
 			}

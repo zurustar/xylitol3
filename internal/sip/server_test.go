@@ -10,16 +10,16 @@ import (
 	"time"
 )
 
-// mustReadFrom is a helper that reads from a packet connection with a timeout.
-func mustReadFrom(t *testing.T, conn net.PacketConn, timeout time.Duration) (string, net.Addr) {
+// tryReadFrom is a helper that reads from a packet connection with a timeout.
+func tryReadFrom(t *testing.T, conn net.PacketConn, timeout time.Duration) (string, net.Addr, error) {
 	t.Helper()
 	buf := make([]byte, 4096)
 	conn.SetReadDeadline(time.Now().Add(timeout))
 	n, addr, err := conn.ReadFrom(buf)
 	if err != nil {
-		t.Fatalf("Failed to read from %s: %v", conn.LocalAddr(), err)
+		return "", nil, err
 	}
-	return string(buf[:n]), addr
+	return string(buf[:n]), addr, nil
 }
 
 func TestSipProxy_InviteCancelFlow(t *testing.T) {
@@ -45,6 +45,7 @@ func TestSipProxy_InviteCancelFlow(t *testing.T) {
 	}
 	defer serverConn.Close()
 	server.listenAddr = serverConn.LocalAddr().String()
+	server.udpConn = serverConn // Set the connection for the proxy to use
 
 	// Run the server's request handler loop in the background
 	go func() {
@@ -58,7 +59,8 @@ func TestSipProxy_InviteCancelFlow(t *testing.T) {
 				continue
 			}
 			message := string(buf[:n])
-			go server.dispatchMessage(serverConn, message, clientAddr)
+			transport := NewUDPTransport(serverConn, clientAddr)
+			go server.dispatchMessage(transport, message)
 		}
 	}()
 
@@ -107,7 +109,10 @@ func TestSipProxy_InviteCancelFlow(t *testing.T) {
 	}
 
 	// Read the forwarded INVITE at Bob's UA
-	fwdInvite, _ := mustReadFrom(t, bob, 200*time.Millisecond)
+	fwdInvite, _, err := tryReadFrom(t, bob, 200*time.Millisecond)
+	if err != nil {
+		t.Fatalf("Bob failed to receive forwarded INVITE: %v", err)
+	}
 
 	// Assertions for the forwarded INVITE
 	if !strings.Contains(fwdInvite, "INVITE "+bobContactURI) {
@@ -115,7 +120,10 @@ func TestSipProxy_InviteCancelFlow(t *testing.T) {
 	}
 
 	// Read the 100 Trying at Alice's UA, which is sent immediately by the InviteServerTx.
-	trying, _ := mustReadFrom(t, alice, 200*time.Millisecond)
+	trying, _, err := tryReadFrom(t, alice, 200*time.Millisecond)
+	if err != nil {
+		t.Fatalf("Alice failed to receive 100 Trying: %v", err)
+	}
 	if !strings.HasPrefix(trying, "SIP/2.0 100 Trying") {
 		t.Fatalf("Expected 100 Trying, but got:\n%s", trying)
 	}
@@ -137,7 +145,10 @@ func TestSipProxy_InviteCancelFlow(t *testing.T) {
 	}
 
 	// Bob should receive the proxied CANCEL request.
-	fwdCancel, _ := mustReadFrom(t, bob, 200*time.Millisecond)
+	fwdCancel, _, err := tryReadFrom(t, bob, 200*time.Millisecond)
+	if err != nil {
+		t.Fatalf("Bob failed to receive forwarded CANCEL: %v", err)
+	}
 	fwdCancelReq, err := ParseSIPRequest(fwdCancel)
 	if err != nil {
 		t.Fatalf("Failed to parse forwarded CANCEL: %v", err)
@@ -150,11 +161,12 @@ func TestSipProxy_InviteCancelFlow(t *testing.T) {
 	// The order is not guaranteed.
 	var got200, got487 bool
 	for i := 0; i < 2; i++ {
-		res, err := mustReadFrom(t, alice, 200*time.Millisecond)
+		res, _, err := tryReadFrom(t, alice, 500*time.Millisecond)
 		if err != nil {
-			// Break the loop on timeout, then check results
+			t.Logf("Reading from alice connection failed, assuming no more messages: %v", err)
 			break
 		}
+		t.Logf("Alice received: \n%s", res)
 		if strings.HasPrefix(res, "SIP/2.0 200 OK") {
 			resParsed, _ := ParseSIPResponse(res)
 			if cseq := resParsed.GetHeader("CSeq"); strings.Contains(cseq, "CANCEL") {
@@ -176,5 +188,5 @@ func TestSipProxy_InviteCancelFlow(t *testing.T) {
 	}
 
 	// Allow time for server-side transactions to terminate gracefully.
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
 }

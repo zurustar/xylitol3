@@ -3,7 +3,6 @@ package sip
 import (
 	"fmt"
 	"log"
-	"net"
 	"sync"
 	"time"
 )
@@ -29,13 +28,11 @@ type NonInviteServerTx struct {
 	done         chan bool
 	responses    chan *SIPResponse
 	requests     chan *SIPRequest
-	transport    net.PacketConn
-	destAddr     net.Addr
-	proto        string
+	transport    Transport
 }
 
 // NewNonInviteServerTx creates and starts a new non-INVITE server transaction.
-func NewNonInviteServerTx(req *SIPRequest, transport net.PacketConn, remoteAddr net.Addr, proto string) (ServerTransaction, error) {
+func NewNonInviteServerTx(req *SIPRequest, transport Transport) (ServerTransaction, error) {
 	topVia, err := req.TopVia()
 	if err != nil {
 		return nil, err
@@ -53,8 +50,6 @@ func NewNonInviteServerTx(req *SIPRequest, transport net.PacketConn, remoteAddr 
 		responses:   make(chan *SIPResponse, 1),
 		requests:    make(chan *SIPRequest, 1),
 		transport:   transport,
-		destAddr:    remoteAddr,
-		proto:       proto,
 	}
 
 	go tx.run()
@@ -116,6 +111,10 @@ func (tx *NonInviteServerTx) OriginalRequest() *SIPRequest {
 	return tx.originalReq
 }
 
+func (tx *NonInviteServerTx) Transport() Transport {
+	return tx.transport
+}
+
 func (tx *NonInviteServerTx) run() {
 	defer tx.Terminate()
 	for {
@@ -136,7 +135,7 @@ func (tx *NonInviteServerTx) run() {
 			if res.StatusCode >= 200 {
 				tx.state = NonInviteServerTxStateCompleted
 				// For reliable transports, terminate immediately. For unreliable, start Timer J.
-				if isReliable(tx.proto) {
+				if isReliable(tx.transport.GetProto()) {
 					tx.mu.Unlock() // Unlock before calling Terminate
 					tx.Terminate()
 					return // End the goroutine
@@ -154,7 +153,7 @@ func (tx *NonInviteServerTx) run() {
 
 func (tx *NonInviteServerTx) send(res *SIPResponse) {
 	log.Printf("TX %s: Sending response:\n%s", tx.id, res.String())
-	_, err := tx.transport.WriteTo([]byte(res.String()), tx.destAddr)
+	_, err := tx.transport.Write([]byte(res.String()))
 	if err != nil {
 		log.Printf("TX %s: transport error sending response: %v", tx.id, err)
 		tx.Terminate()

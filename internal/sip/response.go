@@ -106,7 +106,8 @@ func BuildResponse(statusCode int, statusText string, req *SIPRequest, extraHead
 	}
 
 	// Copy essential headers from the request.
-	headersToCopy := []string{"Via", "From", "To", "Call-Id", "Cseq"}
+	// Use canonical header key forms.
+	headersToCopy := []string{"Via", "From", "To", "Call-ID", "CSeq"}
 	for _, h := range headersToCopy {
 		if val := req.GetHeader(h); val != "" {
 			// Add a tag to the 'To' header in the response, as required by RFC 3261,
@@ -116,7 +117,7 @@ func BuildResponse(statusCode int, statusText string, req *SIPRequest, extraHead
 				// would generate a unique tag for the dialog.
 				val = fmt.Sprintf("%s;tag=z9hG4bK-response-tag", val)
 			}
-			resp.Headers[h] = val
+			resp.Headers[strings.Title(h)] = val
 		}
 	}
 

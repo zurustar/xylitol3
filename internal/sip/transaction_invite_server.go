@@ -3,7 +3,6 @@ package sip
 import (
 	"fmt"
 	"log"
-	"net"
 	"sync"
 	"time"
 )
@@ -31,13 +30,11 @@ type InviteServerTx struct {
 	done         chan bool
 	responses    chan *SIPResponse
 	requests     chan *SIPRequest
-	transport    net.PacketConn
-	destAddr     net.Addr
-	proto        string
+	transport    Transport
 }
 
 // NewInviteServerTx creates and starts a new INVITE server transaction.
-func NewInviteServerTx(req *SIPRequest, transport net.PacketConn, remoteAddr net.Addr, proto string) (ServerTransaction, error) {
+func NewInviteServerTx(req *SIPRequest, transport Transport) (ServerTransaction, error) {
 	topVia, err := req.TopVia()
 	if err != nil {
 		return nil, err
@@ -54,8 +51,6 @@ func NewInviteServerTx(req *SIPRequest, transport net.PacketConn, remoteAddr net
 		responses:   make(chan *SIPResponse, 1),
 		requests:    make(chan *SIPRequest, 1),
 		transport:   transport,
-		destAddr:    remoteAddr,
-		proto:       proto,
 	}
 	tryingRes := BuildResponse(100, "Trying", req, nil)
 	tx.send(tryingRes)
@@ -68,6 +63,10 @@ func (tx *InviteServerTx) ID() string { return tx.id }
 func (tx *InviteServerTx) Done() <-chan bool { return tx.done }
 func (tx *InviteServerTx) Requests() <-chan *SIPRequest { return tx.requests }
 func (tx *InviteServerTx) OriginalRequest() *SIPRequest { return tx.originalReq }
+
+func (tx *InviteServerTx) Transport() Transport {
+	return tx.transport
+}
 
 func (tx *InviteServerTx) Terminate() {
 	tx.mu.Lock()
@@ -97,7 +96,7 @@ func (tx *InviteServerTx) Receive(req *SIPRequest) {
 				tx.timerH.Stop()
 			}
 			// For reliable transports, terminate immediately. For unreliable, start Timer I.
-			if isReliable(tx.proto) {
+			if isReliable(tx.transport.GetProto()) {
 				tx.mu.Unlock() // Unlock before calling Terminate which locks again
 				tx.Terminate()
 				return
@@ -163,7 +162,7 @@ func (tx *InviteServerTx) run() {
 }
 
 func (tx *InviteServerTx) startTimerG() {
-	if isReliable(tx.proto) {
+	if isReliable(tx.transport.GetProto()) {
 		return // Do not retransmit responses over reliable transport
 	}
 	interval := T1
@@ -181,7 +180,7 @@ func (tx *InviteServerTx) startTimerG() {
 
 func (tx *InviteServerTx) send(res *SIPResponse) {
 	log.Printf("TX %s: Sending response:\n%s", tx.id, res.String())
-	_, err := tx.transport.WriteTo([]byte(res.String()), tx.destAddr)
+	_, err := tx.transport.Write([]byte(res.String()))
 	if err != nil {
 		log.Printf("TX %s: transport error sending response: %v", tx.id, err)
 		tx.Terminate()

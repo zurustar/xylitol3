@@ -46,3 +46,49 @@ func (c *mockPacketConn) getLastWritten(timeout time.Duration) (string, bool) {
 		return "", false
 	}
 }
+
+type mockTransport struct {
+	mu         sync.Mutex
+	written    chan []byte
+	proto      string
+	remoteAddr net.Addr
+}
+
+func newMockTransport(proto string, remoteAddr net.Addr) *mockTransport {
+	return &mockTransport{
+		written:    make(chan []byte, 10),
+		proto:      proto,
+		remoteAddr: remoteAddr,
+	}
+}
+
+func (t *mockTransport) Write(p []byte) (n int, err error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	select {
+	case t.written <- p:
+	default:
+	}
+	return len(p), nil
+}
+
+func (t *mockTransport) GetProto() string {
+	return t.proto
+}
+
+func (t *mockTransport) GetRemoteAddr() net.Addr {
+	return t.remoteAddr
+}
+
+func (t *mockTransport) Close() error {
+	return nil
+}
+
+func (t *mockTransport) getLastWritten(timeout time.Duration) (string, bool) {
+	select {
+	case data := <-t.written:
+		return string(data), true
+	case <-time.After(timeout):
+		return "", false
+	}
+}
