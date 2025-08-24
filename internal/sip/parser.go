@@ -21,7 +21,10 @@ func (r *SIPRequest) String() string {
 	var builder strings.Builder
 	builder.WriteString(fmt.Sprintf("%s %s %s\r\n", r.Method, r.URI, r.Proto))
 	for key, value := range r.Headers {
-		builder.WriteString(fmt.Sprintf("%s: %s\r\n", strings.Title(key), value))
+		// Ignore Content-Length from the map, we'll add it based on the Body.
+		if strings.Title(key) != "Content-Length" {
+			builder.WriteString(fmt.Sprintf("%s: %s\r\n", strings.Title(key), value))
+		}
 	}
 	builder.WriteString(fmt.Sprintf("Content-Length: %d\r\n", len(r.Body)))
 	builder.WriteString("\r\n")
@@ -35,28 +38,79 @@ type SIPURI struct {
 	User   string
 	Host   string
 	Port   string
+	Params map[string]string
+}
+
+// String reassembles the URI into a string.
+func (u *SIPURI) String() string {
+	var b strings.Builder
+	b.WriteString(u.Scheme)
+	b.WriteString(":")
+	if u.User != "" {
+		b.WriteString(u.User)
+		b.WriteString("@")
+	}
+	b.WriteString(u.Host)
+	if u.Port != "" {
+		b.WriteString(":")
+		b.WriteString(u.Port)
+	}
+	// Note: This does not preserve the original order of parameters.
+	for k, v := range u.Params {
+		b.WriteString(";")
+		b.WriteString(k)
+		if v != "" {
+			b.WriteString("=")
+			b.WriteString(v)
+		}
+	}
+	return b.String()
 }
 
 // ParseSIPURI parses a SIP URI string into a SIPURI struct.
-// It handles URIs in the format: <sip:user@host:port> or sip:user@host
+// It handles URIs in the format: <sip:user@host:port;params> or sip:user@host
 func ParseSIPURI(uri string) (*SIPURI, error) {
 	uri = strings.Trim(uri, "<>") // Remove angle brackets
 
-	parts := strings.SplitN(uri, ":", 2)
-	if len(parts) != 2 {
-		return nil, fmt.Errorf("invalid URI format: %s", uri)
+	schemeParts := strings.SplitN(uri, ":", 2)
+	if len(schemeParts) != 2 {
+		return nil, fmt.Errorf("invalid URI format (missing scheme): %s", uri)
 	}
 
-	s := &SIPURI{Scheme: parts[0]}
-	remaining := parts[1]
+	s := &SIPURI{
+		Scheme: schemeParts[0],
+		Params: make(map[string]string),
+	}
+	remaining := schemeParts[1]
 
-	userHostPort := strings.SplitN(remaining, "@", 2)
+	// Separate params from the main part
+	mainAndParams := strings.Split(remaining, ";")
+	mainPart := mainAndParams[0]
+
+	// Parse params
+	if len(mainAndParams) > 1 {
+		for _, param := range mainAndParams[1:] {
+			kv := strings.SplitN(param, "=", 2)
+			key := strings.TrimSpace(kv[0])
+			var val string
+			if len(kv) == 2 {
+				val = strings.TrimSpace(kv[1])
+			}
+			s.Params[strings.ToLower(key)] = val
+		}
+	}
+
+	// Parse user@host:port from the main part
+	userHostPort := strings.SplitN(mainPart, "@", 2)
+	var hostPortPart string
 	if len(userHostPort) == 2 {
 		s.User = userHostPort[0]
-		remaining = userHostPort[1]
+		hostPortPart = userHostPort[1]
+	} else {
+		hostPortPart = userHostPort[0]
 	}
 
-	hostPort := strings.SplitN(remaining, ":", 2)
+	hostPort := strings.SplitN(hostPortPart, ":", 2)
 	s.Host = hostPort[0]
 	if len(hostPort) == 2 {
 		s.Port = hostPort[1]
@@ -165,6 +219,37 @@ func (r *SIPRequest) TopVia() (*Via, error) {
 	}
 
 	return ParseVia(topViaValue)
+}
+
+// AllVias parses and returns all Via headers from the request.
+// A request can have multiple Via headers, either on separate lines (which
+// get concatenated into a comma-separated list by the message parser) or
+// as a comma-separated list in a single header line.
+func (r *SIPRequest) AllVias() ([]*Via, error) {
+	viaHeader := r.GetHeader("Via")
+	if viaHeader == "" {
+		return nil, nil // No via headers is not an error
+	}
+
+	// This is a naive split. A proper parser would handle quoted commas.
+	// For this proxy's purpose, it's sufficient.
+	viaValues := strings.Split(viaHeader, ",")
+	vias := make([]*Via, 0, len(viaValues))
+
+	for _, viaValue := range viaValues {
+		viaValue = strings.TrimSpace(viaValue)
+		if viaValue == "" {
+			continue
+		}
+		via, err := ParseVia(viaValue)
+		if err != nil {
+			// Return a partial list and the error
+			return vias, fmt.Errorf("failed to parse via entry '%s': %w", viaValue, err)
+		}
+		vias = append(vias, via)
+	}
+
+	return vias, nil
 }
 
 // ParseSIPRequest parses a raw SIP request from a string.

@@ -145,6 +145,38 @@ func (s *SIPServer) handleRequest(pc net.PacketConn, rawMsg string, remoteAddr n
 		return
 	}
 
+	// RFC 3261 Section 16.3 Item 3: Loop Detection
+	vias, err := req.AllVias()
+	if err != nil {
+		log.Printf("Error parsing Via headers: %v", err)
+		// We can't be sure about loops, but the request is likely malformed.
+		// For now, we'll let it fail later if it's critical.
+	} else {
+		listenHost, listenPort, _ := net.SplitHostPort(s.listenAddr)
+		if listenHost == "" {
+			listenHost = s.listenAddr // Fallback if port is missing, though it shouldn't be.
+		}
+
+		for _, via := range vias {
+			// Compare the host and port of the Via header with our own listen address.
+			viaPort := via.Port
+			if viaPort == "" {
+				// Per RFC 3261 Section 18.2.1, if the port is absent, the default
+				// is 5060 for sip, and 5061 for sips. We only handle sip here.
+				viaPort = "5060"
+			}
+
+			if via.Host == listenHost && viaPort == listenPort {
+				log.Printf("Loop detected: request Via header contains this proxy's address (%s).", s.listenAddr)
+				res := BuildResponse(482, "Loop Detected", req, nil)
+				if _, err := pc.WriteTo([]byte(res.String()), remoteAddr); err != nil {
+					log.Printf("Error sending 482 Loop Detected response: %v", err)
+				}
+				return // Stop processing
+			}
+		}
+	}
+
 	// Per RFC 3261, CANCEL and ACK are special hop-by-hop requests.
 	// They are handled outside of the standard transaction state machines.
 	if req.Method == "CANCEL" {

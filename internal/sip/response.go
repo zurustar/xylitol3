@@ -20,8 +20,10 @@ func (r *SIPResponse) String() string {
 	var builder strings.Builder
 	builder.WriteString(fmt.Sprintf("%s %d %s\r\n", r.Proto, r.StatusCode, r.Reason))
 	for key, value := range r.Headers {
-		// Canonicalize header names for consistency
-		builder.WriteString(fmt.Sprintf("%s: %s\r\n", strings.Title(key), value))
+		// Ignore Content-Length from the map, we'll add it based on the Body.
+		if strings.Title(key) != "Content-Length" {
+			builder.WriteString(fmt.Sprintf("%s: %s\r\n", strings.Title(key), value))
+		}
 	}
 	builder.WriteString(fmt.Sprintf("Content-Length: %d\r\n", len(r.Body)))
 	builder.WriteString("\r\n")
