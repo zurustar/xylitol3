@@ -16,8 +16,8 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// Registration holds information about a user's registered location.
-type Registration struct {
+// Contact holds information about a user's registered location.
+type Contact struct {
 	ContactURI string
 	ExpiresAt  time.Time
 }
@@ -33,16 +33,14 @@ type SessionState struct {
 
 // SIPServer holds the dependencies for the SIP server.
 type SIPServer struct {
-	storage        *storage.Storage
+	storage *storage.Storage
 	txManager      *TransactionManager
-	registrations  map[string]Registration
+	registrations  map[string][]Contact
 	regMutex       sync.RWMutex
 	nonces         map[string]time.Time
 	nonceMutex     sync.Mutex
 	realm          string
 	listenAddr     string // The address this server is listening on, e.g., "1.2.3.4:5060"
-	proxiedTxs     map[string]ClientTransaction
-	proxiedTxMutex sync.RWMutex
 	sessions       map[string]*SessionState
 	sessionMutex   sync.RWMutex
 	udpConn        net.PacketConn
@@ -51,15 +49,45 @@ type SIPServer struct {
 
 // NewSIPServer creates a new SIP server instance.
 func NewSIPServer(s *storage.Storage, realm string) *SIPServer {
-	return &SIPServer{
+	server := &SIPServer{
 		storage:       s,
 		txManager:     NewTransactionManager(),
-		registrations: make(map[string]Registration),
+		registrations: make(map[string][]Contact),
 		nonces:        make(map[string]time.Time),
 		realm:         realm,
-		proxiedTxs:    make(map[string]ClientTransaction),
 		sessions:      make(map[string]*SessionState),
 	}
+	server.startCleaner()
+	return server
+}
+
+// startCleaner runs a background goroutine to periodically clean up expired registrations.
+func (s *SIPServer) startCleaner() {
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			s.regMutex.Lock()
+			now := time.Now()
+			for username, contacts := range s.registrations {
+				updatedContacts := make([]Contact, 0, len(contacts))
+				for _, contact := range contacts {
+					if now.Before(contact.ExpiresAt) {
+						updatedContacts = append(updatedContacts, contact)
+					} else {
+						log.Printf("Cleaner removed expired contact %s for user %s", contact.ContactURI, username)
+					}
+				}
+				if len(updatedContacts) > 0 {
+					s.registrations[username] = updatedContacts
+				} else {
+					delete(s.registrations, username)
+					log.Printf("Cleaner removed user %s as they have no more active contacts", username)
+				}
+			}
+			s.regMutex.Unlock()
+		}
+	}()
 }
 
 // getDialogID generates a unique identifier for a dialog.
@@ -580,7 +608,24 @@ func (s *SIPServer) proxyRoutedRequest(originalReq *SIPRequest, upstreamTx Serve
 	// 6. Forward and stitch responses
 	s.txManager.Add(clientTx)
 	log.Printf("Proxying routed %s from %s to %s via client tx %s", fwdReq.Method, fwdReq.GetHeader("From"), fwdReq.GetHeader("To"), clientTx.ID())
-	s.forwardAndStitch(upstreamTx, clientTx, fwdReq.URI)
+	s.stitchTx(upstreamTx, clientTx)
+}
+
+// stitchTx handles the simple forwarding of a response from a single client
+// transaction back to a single server transaction. This is used for in-dialog requests.
+func (s *SIPServer) stitchTx(upstreamTx ServerTransaction, clientTx ClientTransaction) {
+	go func() {
+		select {
+		case res := <-clientTx.Responses():
+			if res != nil {
+				res.PopVia()
+				upstreamTx.Respond(res)
+			}
+		case <-clientTx.Done():
+		case <-upstreamTx.Done():
+			clientTx.Terminate()
+		}
+	}()
 }
 
 // prepareForwardedRoutedRequest prepares an in-dialog request for forwarding.
@@ -730,11 +775,9 @@ func (s *SIPServer) proxyAckRequest(req *SIPRequest, transport Transport) {
 }
 
 // proxyInitialRequest is the stateful proxy logic for initial requests (no Route header).
+// It now supports forking to multiple registered contacts.
 func (s *SIPServer) proxyInitialRequest(originalReq *SIPRequest, upstreamTx ServerTransaction) {
-	var err error
-
-	var toURI *SIPURI
-	toURI, err = originalReq.GetSIPURIHeader("To")
+	toURI, err := originalReq.GetSIPURIHeader("To")
 	if err != nil {
 		upstreamTx.Respond(BuildResponse(400, "Bad Request", originalReq, map[string]string{"Warning": "Malformed To header"}))
 		return
@@ -746,248 +789,217 @@ func (s *SIPServer) proxyInitialRequest(originalReq *SIPRequest, upstreamTx Serv
 	}
 
 	s.regMutex.RLock()
-	registration, ok := s.registrations[toURI.User]
+	contacts, ok := s.registrations[toURI.User]
 	s.regMutex.RUnlock()
 
-	if !ok {
+	if !ok || len(contacts) == 0 {
 		log.Printf("Proxy lookup failed for user '%s': not registered", toURI.User)
 		upstreamTx.Respond(BuildResponse(480, "Temporarily Unavailable", originalReq, nil))
 		return
 	}
 
-	var contactURI *SIPURI
-	contactURI, err = ParseSIPURI(registration.ContactURI)
-	if err != nil {
-		log.Printf("Error parsing stored Contact URI for user '%s': %v", toURI.User, err)
-		upstreamTx.Respond(BuildResponse(500, "Server Internal Error", originalReq, nil))
-		return
-	}
-
-	destPort := "5060"
-	if contactURI.Port != "" {
-		destPort = contactURI.Port
-	}
-	destHost := contactURI.Host
-	inboundProto := upstreamTx.Transport().GetProto()
-
-	fwdReq := s.prepareForwardedRequest(originalReq, registration.ContactURI, inboundProto)
-	if fwdReq == nil {
-		log.Printf("Dropping request for user %s due to Max-Forwards limit", toURI.User)
-		upstreamTx.Respond(BuildResponse(483, "Too Many Hops", originalReq, nil))
-		return
-	}
-
-	var clientTx ClientTransaction
-	var outboundTransport Transport
-	if strings.ToUpper(inboundProto) == "UDP" {
-		destAddr, err := net.ResolveUDPAddr("udp", destHost+":"+destPort)
-		if err != nil {
-			log.Printf("Could not resolve destination UDP address '%s': %v", registration.ContactURI, err)
-			upstreamTx.Respond(BuildResponse(500, "Server Internal Error", originalReq, nil))
-			return
-		}
-		outboundTransport = NewUDPTransport(s.udpConn, destAddr)
-	} else {
-		destAddr, err := net.ResolveTCPAddr("tcp", destHost+":"+destPort)
-		if err != nil {
-			log.Printf("Could not resolve destination TCP address '%s': %v", registration.ContactURI, err)
-			upstreamTx.Respond(BuildResponse(500, "Server Internal Error", originalReq, nil))
-			return
-		}
-		conn, err := net.DialTCP("tcp", nil, destAddr)
-		if err != nil {
-			log.Printf("Could not connect to destination TCP address '%s': %v", registration.ContactURI, err)
-			upstreamTx.Respond(BuildResponse(503, "Service Unavailable", originalReq, nil))
-			return
-		}
-		outboundTransport = NewTCPTransport(conn)
-	}
-
-	switch fwdReq.Method {
-	case "INVITE", "UPDATE":
-		clientTx, err = NewInviteClientTx(fwdReq, outboundTransport)
-	default:
-		clientTx, err = NewNonInviteClientTx(fwdReq, outboundTransport)
-	}
-
-	if err != nil {
-		log.Printf("Failed to create client transaction: %v", err)
-		upstreamTx.Respond(BuildResponse(500, "Server Internal Error", originalReq, nil))
-		return
-	}
-	s.txManager.Add(clientTx)
-	log.Printf("Proxying initial %s from %s to %s via client tx %s", originalReq.Method, originalReq.GetHeader("From"), originalReq.GetHeader("To"), clientTx.ID())
-
-	s.forwardAndStitch(upstreamTx, clientTx, registration.ContactURI)
+	// This is where the forking happens.
+	s.forkAndProxy(originalReq, upstreamTx, contacts)
 }
 
-// forwardAndStitch handles the forwarding of a request via a client transaction
-// and stitches the response back to the upstream server transaction. It also handles
-// retries for session timer negotiation (422 responses).
-func (s *SIPServer) forwardAndStitch(upstreamTx ServerTransaction, clientTx ClientTransaction, nextHopURI string) {
-	s.proxiedTxMutex.Lock()
-	s.proxiedTxs[upstreamTx.ID()] = clientTx
-	s.proxiedTxMutex.Unlock()
+// forkAndProxy creates multiple client transactions for each contact and manages the responses.
+func (s *SIPServer) forkAndProxy(originalReq *SIPRequest, upstreamTx ServerTransaction, contacts []Contact) {
+	var clientTxs []ClientTransaction
+	inboundProto := upstreamTx.Transport().GetProto()
 
-	go func() {
-		defer func() {
-			s.proxiedTxMutex.Lock()
-			delete(s.proxiedTxs, upstreamTx.ID())
-			s.proxiedTxMutex.Unlock()
-		}()
+	toURI, err := originalReq.GetSIPURIHeader("To")
+	if err != nil {
+		// This should have been validated earlier, but we check again.
+		log.Printf("Error getting To header in forkAndProxy: %v", err)
+		return
+	}
 
-		isInvite := upstreamTx.OriginalRequest().Method == "INVITE"
-		var timerC *time.Timer
-		if isInvite {
-			// RFC 3261 Section 16.6 Item 11: Set Timer C for INVITE transactions.
-			// It must be larger than 3 minutes.
-			timerC = time.NewTimer(3*time.Minute + 5*time.Second)
-			defer timerC.Stop()
+	for _, contact := range contacts {
+		fwdReq := s.prepareForwardedRequest(originalReq, contact.ContactURI, inboundProto)
+		if fwdReq == nil {
+			log.Printf("Skipping contact %s for user %s due to Max-Forwards limit", contact.ContactURI, toURI.User)
+			continue
 		}
-		receivedProvisional := false
 
-		currentClientTx := clientTx
-		maxRetries := 5
-		maxMinSE := 0
+		contactURI, err := ParseSIPURI(contact.ContactURI)
+		if err != nil {
+			log.Printf("Error parsing stored Contact URI '%s': %v", contact.ContactURI, err)
+			continue
+		}
 
-		for i := 0; i < maxRetries; i++ {
-			var timerCChan <-chan time.Time
-			if timerC != nil {
-				timerCChan = timerC.C
+		destPort := "5060"
+		if contactURI.Port != "" {
+			destPort = contactURI.Port
+		}
+		destHost := contactURI.Host
+
+		var clientTx ClientTransaction
+		var outboundTransport Transport
+		if strings.ToUpper(inboundProto) == "UDP" {
+			destAddr, err := net.ResolveUDPAddr("udp", destHost+":"+destPort)
+			if err != nil {
+				log.Printf("Could not resolve destination UDP address '%s': %v", contact.ContactURI, err)
+				continue
 			}
+			outboundTransport = NewUDPTransport(s.udpConn, destAddr)
+		} else {
+			destAddr, err := net.ResolveTCPAddr("tcp", destHost+":"+destPort)
+			if err != nil {
+				log.Printf("Could not resolve destination TCP address '%s': %v", contact.ContactURI, err)
+				continue
+			}
+			conn, err := net.DialTCP("tcp", nil, destAddr)
+			if err != nil {
+				log.Printf("Could not connect to destination TCP address '%s': %v", contact.ContactURI, err)
+				continue
+			}
+			outboundTransport = NewTCPTransport(conn)
+		}
 
+		switch fwdReq.Method {
+		case "INVITE", "UPDATE":
+			clientTx, err = NewInviteClientTx(fwdReq, outboundTransport)
+		default:
+			clientTx, err = NewNonInviteClientTx(fwdReq, outboundTransport)
+		}
+
+		if err != nil {
+			log.Printf("Failed to create client transaction for contact %s: %v", contact.ContactURI, err)
+			continue
+		}
+
+		s.txManager.Add(clientTx)
+		log.Printf("Forking initial %s to %s (branch: %s)", originalReq.Method, contact.ContactURI, clientTx.ID())
+		clientTxs = append(clientTxs, clientTx)
+	}
+
+	if len(clientTxs) == 0 {
+		toURI, _ := originalReq.GetSIPURIHeader("To")
+		log.Printf("No reachable contacts for user %s.", toURI.User)
+		upstreamTx.Respond(BuildResponse(480, "Temporarily Unavailable", originalReq, nil))
+		return
+	}
+
+	// This goroutine will manage all the responses from the forked branches.
+	go s.manageForkedResponses(upstreamTx, clientTxs)
+}
+
+// manageForkedResponses collects responses from all forked client transactions
+// and decides what to do based on RFC 3261's forking rules.
+func (s *SIPServer) manageForkedResponses(upstreamTx ServerTransaction, clientTxs []ClientTransaction) {
+	responseChan := make(chan *SIPResponse, len(clientTxs))
+	var wg sync.WaitGroup
+	wg.Add(len(clientTxs))
+
+	// Launch a goroutine for each client transaction to wait for its response.
+	for _, ctx := range clientTxs {
+		go func(clientTx ClientTransaction) {
+			defer wg.Done()
 			select {
-			case <-timerCChan:
-				// RFC 3261 Section 16.8: Processing Timer C
-				log.Printf("Proxy Timer C fired for INVITE tx %s", upstreamTx.ID())
-				if receivedProvisional {
-					log.Printf("Timer C: Provisional response was received. Cancelling downstream transaction.")
-					if inviteClientTx, ok := currentClientTx.(*InviteClientTx); ok {
-						cancelReq := createCancelRequest(inviteClientTx.OriginalRequest())
-					log.Printf("Proxying CANCEL for Timer C to %s", inviteClientTx.Transport().GetRemoteAddr())
-					if _, err := inviteClientTx.Transport().Write([]byte(cancelReq.String())); err != nil {
-							log.Printf("Error proxying CANCEL for Timer C: %v", err)
+			case res := <-clientTx.Responses():
+				if res != nil {
+					responseChan <- res
+				}
+			case <-clientTx.Done():
+			case <-time.After(32 * time.Second): // Safety timeout
+				log.Printf("Timeout waiting for response from branch %s", clientTx.ID())
+			}
+		}(ctx)
+	}
+
+	var bestFinalResponse *SIPResponse
+	var finalResponseCount int
+	var successResponse *SIPResponse
+
+	for {
+		select {
+		case res := <-responseChan:
+			log.Printf("Fork manager received response: %d %s from branch %s", res.StatusCode, res.Reason, res.GetHeader("Via"))
+
+			if res.StatusCode >= 100 && res.StatusCode < 200 {
+				// Forward provisional responses immediately.
+				upstreamTx.Respond(res)
+			} else if res.StatusCode >= 200 && res.StatusCode < 300 {
+				// First 2xx success response wins.
+				if successResponse == nil {
+					successResponse = res
+
+					if upstreamTx.OriginalRequest().Method == "INVITE" || upstreamTx.OriginalRequest().Method == "UPDATE" {
+						uacSupportsTimer := strings.Contains(strings.ToLower(upstreamTx.OriginalRequest().GetHeader("Supported")), "timer")
+						respSE, _ := res.SessionExpires()
+
+						if respSE != nil {
+							s.createOrUpdateSession(upstreamTx, res, respSE)
+						} else {
+							if uacSupportsTimer {
+								reqSE, _ := upstreamTx.OriginalRequest().SessionExpires()
+								if reqSE != nil {
+									log.Printf("UAS doesn't support session timer, but UAC does. Inserting Session-Expires header into 2xx response.")
+									res.Headers["Session-Expires"] = fmt.Sprintf("%d;refresher=uac", reqSE.Delta)
+									if existing, ok := res.Headers["Require"]; ok {
+										if !strings.Contains(strings.ToLower(existing), "timer") {
+											res.Headers["Require"] = "timer, " + existing
+										}
+									} else {
+										res.Headers["Require"] = "timer"
+									}
+									finalSE, _ := res.SessionExpires()
+									s.createOrUpdateSession(upstreamTx, res, finalSE)
+								}
+							}
 						}
 					}
-				} else {
-					log.Printf("Timer C: No provisional response received. Responding 408 to upstream.")
-					upstreamTx.Respond(BuildResponse(408, "Request Timeout", upstreamTx.OriginalRequest(), nil))
-				}
-				return // End this goroutine.
 
-			case res := <-currentClientTx.Responses():
-				if res == nil {
-					continue
-				}
-
-				// RFC 3261 Section 16.7 Item 2: Reset timer C on provisional response.
-				if isInvite && res.StatusCode > 100 && res.StatusCode < 200 {
-					log.Printf("Received provisional response for INVITE tx %s, resetting Timer C", upstreamTx.ID())
-					receivedProvisional = true
-					timerC.Reset(3*time.Minute + 5*time.Second)
-				}
-
-				if res.StatusCode == 422 && currentClientTx.OriginalRequest().Method == "INVITE" {
-					log.Printf("Proxy received 422 for tx %s. Retrying...", currentClientTx.ID())
-					currentClientTx.Terminate()
-
-					minSE, err := res.MinSE()
-					if err != nil || minSE <= 0 {
-						log.Printf("422 response has invalid or missing Min-SE header. Aborting.")
-						upstreamTx.Respond(BuildResponse(500, "Server Internal Error", upstreamTx.OriginalRequest(), nil))
-						return
-					}
-					if minSE > maxMinSE {
-						maxMinSE = minSE
-					}
-
-					cseqStr := currentClientTx.OriginalRequest().GetHeader("CSeq")
-					cseq, method, ok := parseCSeq(cseqStr)
-					if !ok {
-						log.Printf("Could not parse CSeq from forwarded request. Aborting.")
-						upstreamTx.Respond(BuildResponse(500, "Server Internal Error", upstreamTx.OriginalRequest(), nil))
-						return
-					}
-
-					inboundProto := upstreamTx.Transport().GetProto()
-					newFwdReq := s.prepareForwardedRequest(upstreamTx.OriginalRequest(), nextHopURI, inboundProto)
-					newFwdReq.Headers["CSeq"] = fmt.Sprintf("%d %s", cseq+1, method)
-					newFwdReq.Headers["Min-SE"] = strconv.Itoa(maxMinSE)
-					newFwdReq.Headers["Session-Expires"] = strconv.Itoa(maxMinSE)
-
-					// Reuse the transport from the previous attempt.
-					outboundTransport := currentClientTx.Transport()
-					newClientTx, err := NewInviteClientTx(newFwdReq, outboundTransport)
+					// Respond to the upstream caller.
+					upstreamTx.Respond(res)
+					// Cancel all other pending client transactions.
+					topVia, err := res.TopVia()
 					if err != nil {
-						log.Printf("Failed to create client transaction for retry: %v", err)
-						upstreamTx.Respond(BuildResponse(500, "Server Internal Error", upstreamTx.OriginalRequest(), nil))
-						return
+						log.Printf("Could not get Via from successful response to cancel other branches: %v", err)
+						continue
 					}
-					s.txManager.Add(newClientTx)
-					s.proxiedTxMutex.Lock()
-					s.proxiedTxs[upstreamTx.ID()] = newClientTx
-					s.proxiedTxMutex.Unlock()
-
-					currentClientTx = newClientTx
-					continue
-				}
-
-				log.Printf("Proxy received response for tx %s: %d %s", currentClientTx.ID(), res.StatusCode, res.Reason)
-
-				topVia, err := res.TopVia()
-				if err != nil {
-					log.Printf("Could not parse Via header from response: %v. Dropping response.", err)
-					continue
-				}
-
-				if res.StatusCode >= 200 && res.StatusCode < 300 && (upstreamTx.OriginalRequest().Method == "INVITE" || upstreamTx.OriginalRequest().Method == "UPDATE") {
-					uacSupportsTimer := strings.Contains(strings.ToLower(upstreamTx.OriginalRequest().GetHeader("Supported")), "timer")
-					respSE, _ := res.SessionExpires()
-
-					if respSE != nil {
-						s.createOrUpdateSession(upstreamTx, res, respSE)
-					} else {
-						if uacSupportsTimer {
-							reqSE, _ := upstreamTx.OriginalRequest().SessionExpires()
-							if reqSE != nil {
-								log.Printf("UAS doesn't support session timer, but UAC does. Inserting Session-Expires header into 2xx response.")
-								res.Headers["Session-Expires"] = fmt.Sprintf("%d;refresher=uac", reqSE.Delta)
-								if existing, ok := res.Headers["Require"]; ok {
-									if !strings.Contains(strings.ToLower(existing), "timer") {
-										res.Headers["Require"] = "timer, " + existing
-									}
-								} else {
-									res.Headers["Require"] = "timer"
+					for _, ctx := range clientTxs {
+						if ctx.ID() != topVia.Branch() {
+							if inviteClientTx, ok := ctx.(*InviteClientTx); ok {
+								cancelReq := createCancelRequest(inviteClientTx.OriginalRequest())
+								log.Printf("Sending CANCEL to branch %s", inviteClientTx.ID())
+								if _, err := inviteClientTx.Transport().Write([]byte(cancelReq.String())); err != nil {
+									log.Printf("Error sending CANCEL to branch %s: %v", inviteClientTx.ID(), err)
 								}
-								finalSE, _ := res.SessionExpires()
-								s.createOrUpdateSession(upstreamTx, res, finalSE)
 							}
 						}
 					}
 				}
-
-				if topVia.Branch() == currentClientTx.ID() {
-					res.PopVia()
-				} else {
-					log.Printf("WARN: Top Via branch '%s' in response did not match client tx branch '%s'. Not stripping Via.", topVia.Branch(), currentClientTx.ID())
-				}
-				upstreamTx.Respond(res)
-				if res.StatusCode >= 200 {
-					return // This will trigger the deferred timerC.Stop()
-				}
-			case <-currentClientTx.Done():
-				log.Printf("Client transaction %s terminated.", currentClientTx.ID())
-				return
-			case <-upstreamTx.Done():
-				log.Printf("Upstream transaction %s terminated. Terminating downstream.", upstreamTx.ID())
-				currentClientTx.Terminate()
-				return
+				// We have a success, so we can stop waiting for other responses.
+				// We still need to wait for all goroutines to finish.
+				finalResponseCount++
+			} else if res.StatusCode >= 300 {
+				// Collect final non-2xx responses.
+				finalResponseCount++
+				// Simple logic: just keep the last one. A real proxy might have more complex logic.
+				bestFinalResponse = res
 			}
+
+			if finalResponseCount == len(clientTxs) {
+				// All branches have responded.
+				if successResponse == nil && bestFinalResponse != nil {
+					// If there was no success, forward the best final response we got.
+					log.Printf("All forks failed. Responding with best final response: %d %s", bestFinalResponse.StatusCode, bestFinalResponse.Reason)
+					upstreamTx.Respond(bestFinalResponse)
+				}
+				return // Exit the manager.
+			}
+
+		case <-time.After(64 * time.Second): // Overall timeout for the forking proxy.
+			log.Printf("Fork manager timed out for upstream tx %s", upstreamTx.ID())
+			if successResponse == nil && bestFinalResponse == nil {
+				upstreamTx.Respond(BuildResponse(408, "Request Timeout", upstreamTx.OriginalRequest(), nil))
+			}
+			return
 		}
-		log.Printf("Exceeded max retries for session timer negotiation for tx %s", upstreamTx.ID())
-		upstreamTx.Respond(BuildResponse(500, "Server Internal Error", upstreamTx.OriginalRequest(), map[string]string{"Warning": "Session timer negotiation failed"}))
-	}()
+	}
 }
+
 
 // parseCSeq is a helper to extract number and method from CSeq header.
 func parseCSeq(cseqHeader string) (int, string, bool) {
@@ -1107,6 +1119,14 @@ func (s *SIPServer) updateRegistration(req *SIPRequest) {
 	username := req.Authorization["username"]
 	contactHeader := req.GetHeader("Contact")
 
+	// Per RFC 3261 Section 10.2.1, a REGISTER with "*" in the Contact header
+	// and Expires=0 means unregister all contacts for this AOR.
+	if contactHeader == "*" && req.Expires() == 0 {
+		delete(s.registrations, username)
+		log.Printf("Unregistered all contacts for user '%s'", username)
+		return
+	}
+
 	start := strings.Index(contactHeader, "<")
 	end := strings.Index(contactHeader, ">")
 	var contactURI string
@@ -1117,15 +1137,43 @@ func (s *SIPServer) updateRegistration(req *SIPRequest) {
 	}
 
 	expires := req.Expires()
+	contacts := s.registrations[username]
+	found := false
+
 	if expires > 0 {
-		s.registrations[username] = Registration{
-			ContactURI: contactURI,
-			ExpiresAt:  time.Now().Add(time.Duration(expires) * time.Second),
+		// Update existing contact or add a new one
+		for i, c := range contacts {
+			if c.ContactURI == contactURI {
+				contacts[i].ExpiresAt = time.Now().Add(time.Duration(expires) * time.Second)
+				found = true
+				log.Printf("Updated registration for user '%s' at %s, new expiry in %d seconds", username, contactURI, expires)
+				break
+			}
 		}
-		log.Printf("Registered user '%s' at %s, expires in %d seconds", username, contactURI, expires)
+		if !found {
+			newContact := Contact{
+				ContactURI: contactURI,
+				ExpiresAt:  time.Now().Add(time.Duration(expires) * time.Second),
+			}
+			contacts = append(contacts, newContact)
+			log.Printf("Added new registration for user '%s' at %s, expires in %d seconds", username, contactURI, expires)
+		}
 	} else {
+		// Remove the specific contact
+		for i, c := range contacts {
+			if c.ContactURI == contactURI {
+				contacts = append(contacts[:i], contacts[i+1:]...)
+				log.Printf("Unregistered contact %s for user '%s'", contactURI, username)
+				break
+			}
+		}
+	}
+
+	if len(contacts) > 0 {
+		s.registrations[username] = contacts
+	} else {
+		// If no contacts are left, remove the user from the map
 		delete(s.registrations, username)
-		log.Printf("Unregistered user '%s'", username)
 	}
 }
 
@@ -1213,22 +1261,28 @@ func (s *SIPServer) handleCancel(transport Transport, req *SIPRequest) {
 		log.Printf("Error sending 200 OK for CANCEL: %v", err)
 	}
 
-	// Check if this INVITE was proxied and cancel the downstream leg.
-	s.proxiedTxMutex.RLock()
-	clientTx, foundProxy := s.proxiedTxs[branchID]
-	s.proxiedTxMutex.RUnlock()
+	// Propagate the CANCEL to any matching client transactions.
+	s.txManager.mu.RLock()
+	for _, tx := range s.txManager.transactions {
+		if clientTx, ok := tx.(ClientTransaction); ok {
+			origReq := clientTx.OriginalRequest()
+			if origReq.GetHeader("Call-ID") == req.GetHeader("Call-ID") &&
+				origReq.GetHeader("From") == req.GetHeader("From") &&
+				origReq.GetHeader("To") == req.GetHeader("To") {
 
-	if foundProxy {
-		log.Printf("Found downstream client transaction %s to cancel", clientTx.ID())
-		cancelReq := createCancelRequest(clientTx.OriginalRequest())
-		// The destination for the CANCEL is the same as the INVITE's client transaction
-		if inviteClientTx, ok := clientTx.(*InviteClientTx); ok {
-			log.Printf("Proxying CANCEL to %s", inviteClientTx.Transport().GetRemoteAddr())
-			if _, err := inviteClientTx.Transport().Write([]byte(cancelReq.String())); err != nil {
-				log.Printf("Error proxying CANCEL request: %v", err)
+				log.Printf("Found downstream client transaction %s to cancel", clientTx.ID())
+				cancelReq := createCancelRequest(clientTx.OriginalRequest())
+				if inviteClientTx, ok := clientTx.(*InviteClientTx); ok {
+					log.Printf("Proxying CANCEL to %s", inviteClientTx.Transport().GetRemoteAddr())
+					if _, err := inviteClientTx.Transport().Write([]byte(cancelReq.String())); err != nil {
+						log.Printf("Error proxying CANCEL request: %v", err)
+					}
+				}
 			}
 		}
 	}
+	s.txManager.mu.RUnlock()
+
 
 	// Respond 487 to the original INVITE.
 	res487 := BuildResponse(487, "Request Terminated", srvTx.OriginalRequest(), nil)
