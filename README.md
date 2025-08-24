@@ -10,6 +10,7 @@ The server listens for SIP traffic on UDP and serves a web UI on a separate port
 - **SIP Proxy**: Forwards requests like `INVITE` and `BYE` between registered users on the same domain. It acts as a stateful proxy by using the `Record-Route` header to remain in the signaling path.
 - **Digest Authentication**: Authenticates users using Digest Authentication (MD5) as per RFC2617.
 - **Web UI**: A simple web interface to add and view users and their authentication credentials (HA1 hashes).
+- **Session Monitoring**: A web page to view all active SIP calls (dialogs) being handled by the server in real-time.
 - **Pure Go**: Built with pure Go libraries, including a pure-Go SQLite driver, making it easy to compile and deploy.
 
 ## Dependencies
@@ -57,4 +58,5 @@ Once the server is running, you can access the web UI by navigating to the addre
 
 From the web UI, you can:
 - View a list of all registered users and their HA1 hashes.
-- Add new users by providing a username, password, and realm. The server will automatically compute and store the required HA1 hash for authentication.
+- Add new users by providing a username, and password. The server will automatically compute and store the required HA1 hash for authentication.
+- **Monitor Active Sessions**: The web UI also provides a page at `/sessions` to see a list of all ongoing calls, including caller, callee, duration, and the SIP Call-ID.
