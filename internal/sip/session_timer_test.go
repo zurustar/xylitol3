@@ -76,6 +76,7 @@ func TestSipProxy_SessionTimer_RejectsLowSE(t *testing.T) {
 	assert.NoError(t, err)
 	defer serverConn.Close()
 	server.listenAddr = serverConn.LocalAddr().String()
+	server.udpConn = serverConn
 
 	go func() {
 		buf := make([]byte, 4096)
@@ -88,7 +89,8 @@ func TestSipProxy_SessionTimer_RejectsLowSE(t *testing.T) {
 				continue
 			}
 			message := string(buf[:n])
-			go server.dispatchMessage(serverConn, message, clientAddr)
+			transport := NewUDPTransport(serverConn, clientAddr)
+			go server.dispatchMessage(transport, message)
 		}
 	}()
 
@@ -120,11 +122,13 @@ func TestSipProxy_SessionTimer_RejectsLowSE(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Read 100 Trying first
-	tryingRes, _ := mustReadFrom(t, alice, 200*time.Millisecond)
+	tryingRes, _, err := tryReadFrom(t, alice, 200*time.Millisecond)
+	assert.NoError(t, err)
 	assert.True(t, strings.HasPrefix(tryingRes, "SIP/2.0 100 Trying"))
 
 	// Read final response
-	resStr, _ := mustReadFrom(t, alice, 200*time.Millisecond)
+	resStr, _, err := tryReadFrom(t, alice, 200*time.Millisecond)
+	assert.NoError(t, err)
 
 	// Assertions
 	assert.True(t, strings.HasPrefix(resStr, "SIP/2.0 422 Session Interval Too Small"))
@@ -147,6 +151,7 @@ func TestSipProxy_SessionTimer_HandlesDownstream422(t *testing.T) {
 	assert.NoError(t, err)
 	defer serverConn.Close()
 	server.listenAddr = serverConn.LocalAddr().String()
+	server.udpConn = serverConn
 	go func() {
 		buf := make([]byte, 4096)
 		for {
@@ -157,7 +162,8 @@ func TestSipProxy_SessionTimer_HandlesDownstream422(t *testing.T) {
 			if err != nil {
 				continue
 			}
-			go server.dispatchMessage(serverConn, string(buf[:n]), clientAddr)
+			transport := NewUDPTransport(serverConn, clientAddr)
+			go server.dispatchMessage(transport, string(buf[:n]))
 		}
 	}()
 
@@ -177,21 +183,24 @@ func TestSipProxy_SessionTimer_HandlesDownstream422(t *testing.T) {
 	// Bob's UAS will reject the first INVITE with 422
 	go func() {
 		// 1. Read INVITE from proxy
-		fwdInviteStr, proxyAddr := mustReadFrom(t, bob, 200*time.Millisecond)
+		fwdInviteStr, proxyAddr, err := tryReadFrom(t, bob, 200*time.Millisecond)
+		assert.NoError(t, err)
 		fwdInvite, _ := ParseSIPRequest(fwdInviteStr)
 
 		// 2. Bob rejects with 422
 		res422 := BuildResponse(422, "Session Interval Too Small", fwdInvite, map[string]string{"Min-SE": "2000"})
-		_, err := bob.WriteTo([]byte(res422.String()), proxyAddr)
+		_, err = bob.WriteTo([]byte(res422.String()), proxyAddr)
 		assert.NoError(t, err)
 
 		// 3. The proxy's client transaction will send an ACK for the 422. The UAS must read and ignore it.
-		ackStr, _ := mustReadFrom(t, bob, 200*time.Millisecond)
+		ackStr, _, err := tryReadFrom(t, bob, 200*time.Millisecond)
+		assert.NoError(t, err)
 		ackReq, _ := ParseSIPRequest(ackStr)
 		assert.Equal(t, "ACK", ackReq.Method)
 
 		// 4. Read retry INVITE from proxy
-		retryInviteStr, _ := mustReadFrom(t, bob, 200*time.Millisecond)
+		retryInviteStr, _, err := tryReadFrom(t, bob, 200*time.Millisecond)
+		assert.NoError(t, err)
 		retryInvite, _ := ParseSIPRequest(retryInviteStr)
 		assert.Equal(t, "2 INVITE", retryInvite.GetHeader("CSeq"))
 		minSE, _ := retryInvite.MinSE()
@@ -223,10 +232,12 @@ func TestSipProxy_SessionTimer_HandlesDownstream422(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Alice should receive a 100 Trying, then a 200 OK. She should NOT see the 422.
-	tryingRes, _ := mustReadFrom(t, alice, 200*time.Millisecond)
+	tryingRes, _, err := tryReadFrom(t, alice, 200*time.Millisecond)
+	assert.NoError(t, err)
 	assert.True(t, strings.HasPrefix(tryingRes, "SIP/2.0 100 Trying"))
 
-	okResStr, _ := mustReadFrom(t, alice, 500*time.Millisecond)
+	okResStr, _, err := tryReadFrom(t, alice, 500*time.Millisecond)
+	assert.NoError(t, err)
 	assert.True(t, strings.HasPrefix(okResStr, "SIP/2.0 200 OK"))
 	okRes, _ := ParseSIPResponse(okResStr)
 	se, _ := okRes.SessionExpires()
@@ -246,6 +257,7 @@ func TestSipProxy_SessionTimer_UASDoesNotSupport(t *testing.T) {
 	assert.NoError(t, err)
 	defer serverConn.Close()
 	server.listenAddr = serverConn.LocalAddr().String()
+	server.udpConn = serverConn
 	go func() {
 		buf := make([]byte, 4096)
 		for {
@@ -256,7 +268,8 @@ func TestSipProxy_SessionTimer_UASDoesNotSupport(t *testing.T) {
 			if err != nil {
 				continue
 			}
-			go server.dispatchMessage(serverConn, string(buf[:n]), clientAddr)
+			transport := NewUDPTransport(serverConn, clientAddr)
+			go server.dispatchMessage(transport, string(buf[:n]))
 		}
 	}()
 
@@ -275,12 +288,13 @@ func TestSipProxy_SessionTimer_UASDoesNotSupport(t *testing.T) {
 	// --- TEST ---
 	// Bob's UAS will reply 200 OK but without any session timer headers
 	go func() {
-		fwdInviteStr, proxyAddr := mustReadFrom(t, bob, 200*time.Millisecond)
+		fwdInviteStr, proxyAddr, err := tryReadFrom(t, bob, 200*time.Millisecond)
+		assert.NoError(t, err)
 		fwdInvite, _ := ParseSIPRequest(fwdInviteStr)
 		res200 := BuildResponse(200, "OK", fwdInvite, map[string]string{
 			"Contact": fmt.Sprintf("<sip:bob@%s>", bob.LocalAddr().String()),
 		})
-		_, err := bob.WriteTo([]byte(res200.String()), proxyAddr)
+		_, err = bob.WriteTo([]byte(res200.String()), proxyAddr)
 		assert.NoError(t, err)
 	}()
 
@@ -301,11 +315,13 @@ func TestSipProxy_SessionTimer_UASDoesNotSupport(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Alice should receive a 100 Trying, then a 200 OK.
-	tryingRes, _ := mustReadFrom(t, alice, 200*time.Millisecond)
+	tryingRes, _, err := tryReadFrom(t, alice, 200*time.Millisecond)
+	assert.NoError(t, err)
 	assert.True(t, strings.HasPrefix(tryingRes, "SIP/2.0 100 Trying"))
 
 	// The 200 OK she receives should have been modified by the proxy
-	okResStr, _ := mustReadFrom(t, alice, 200*time.Millisecond)
+	okResStr, _, err := tryReadFrom(t, alice, 200*time.Millisecond)
+	assert.NoError(t, err)
 	assert.True(t, strings.HasPrefix(okResStr, "SIP/2.0 200 OK"))
 	okRes, _ := ParseSIPResponse(okResStr)
 

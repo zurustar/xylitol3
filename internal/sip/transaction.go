@@ -51,6 +51,7 @@ type BaseTransaction interface {
 	ID() string
 	Done() <-chan bool
 	Terminate()
+	Transport() Transport
 }
 
 // ServerTransaction represents a server-side transaction.
