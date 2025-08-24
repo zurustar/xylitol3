@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"path/filepath"
+	"sip-server/internal/sip"
 	"sip-server/internal/storage"
 )
 
@@ -15,10 +16,11 @@ type Server struct {
 	storage   *storage.Storage
 	templates map[string]*template.Template
 	realm     string
+	sipServer *sip.SIPServer
 }
 
 // NewServer creates a new web server instance.
-func NewServer(s *storage.Storage, realm string) (*Server, error) {
+func NewServer(s *storage.Storage, realm string, sipServer *sip.SIPServer) (*Server, error) {
 	templates, err := parseTemplates()
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse templates: %w", err)
@@ -28,6 +30,7 @@ func NewServer(s *storage.Storage, realm string) (*Server, error) {
 		storage:   s,
 		templates: templates,
 		realm:     realm,
+		sipServer: sipServer,
 	}, nil
 }
 
@@ -42,6 +45,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/", s.handleRoot)
 	mux.HandleFunc("/users", s.handleUsers)
 	mux.HandleFunc("/users/new", s.handleUsersNew)
+	mux.HandleFunc("/sessions", s.handleSessions)
 }
 
 func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
@@ -89,6 +93,15 @@ func (s *Server) handleUsersNew(w http.ResponseWriter, r *http.Request) {
 		s.handleUsersNewSubmit(w, r)
 	default:
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
+	sessions := s.sipServer.GetActiveSessions()
+	tmpl := s.templates["sessions.html"]
+	if err := tmpl.Execute(w, sessions); err != nil {
+		log.Printf("Error executing template: %v", err)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 	}
 }
 

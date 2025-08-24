@@ -34,14 +34,14 @@ func main() {
 	defer s.Close()
 	log.Printf("Storage initialized with database file: %s", *dbPath)
 
+	// Create SIP server
+	sipServer := sip.NewSIPServer(s, *realm)
+
 	// Create web server
-	webServer, err := web.NewServer(s, *realm)
+	webServer, err := web.NewServer(s, *realm, sipServer)
 	if err != nil {
 		log.Fatalf("Failed to create web server: %v", err)
 	}
-
-	// Create SIP server
-	sipServer := sip.NewSIPServer(s, *realm)
 
 	// --- Server Execution ---
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
