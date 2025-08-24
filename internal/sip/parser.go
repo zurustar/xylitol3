@@ -232,6 +232,63 @@ func parseAuthHeader(headerValue string) map[string]string {
 	return result
 }
 
+// SessionExpires represents the parsed value of a Session-Expires header.
+type SessionExpires struct {
+	Delta     int
+	Refresher string // "uac" or "uas"
+}
+
+// ParseSessionExpires parses the value of a Session-Expires header.
+func ParseSessionExpires(headerValue string) (*SessionExpires, error) {
+	se := &SessionExpires{}
+	parts := strings.Split(headerValue, ";")
+
+	delta, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+	if err != nil {
+		return nil, fmt.Errorf("could not parse delta-seconds: %w", err)
+	}
+	se.Delta = delta
+
+	for _, part := range parts[1:] {
+		paramParts := strings.SplitN(part, "=", 2)
+		if len(paramParts) == 2 {
+			key := strings.ToLower(strings.TrimSpace(paramParts[0]))
+			val := strings.ToLower(strings.TrimSpace(paramParts[1]))
+			if key == "refresher" {
+				se.Refresher = val
+			}
+		}
+	}
+	return se, nil
+}
+
+// SessionExpires parses the Session-Expires header from the request.
+func (r *SIPRequest) SessionExpires() (*SessionExpires, error) {
+	seHeader := r.GetHeader("Session-Expires")
+	if seHeader == "" {
+		// Also check compact form 'x'
+		seHeader = r.GetHeader("x")
+	}
+	if seHeader == "" {
+		return nil, nil // Not an error, header is just not present
+	}
+	return ParseSessionExpires(seHeader)
+}
+
+// MinSE parses the Min-SE header from the request. Returns -1 if not found.
+func (r *SIPRequest) MinSE() (int, error) {
+	minSEHeader := r.GetHeader("Min-SE")
+	if minSEHeader == "" {
+		return -1, nil // Not an error, header is not present
+	}
+	// Min-SE only has a delta-seconds value
+	minSE, err := strconv.Atoi(strings.TrimSpace(minSEHeader))
+	if err != nil {
+		return -1, fmt.Errorf("could not parse Min-SE value: %w", err)
+	}
+	return minSE, nil
+}
+
 // Expires returns the expiration time from the Contact or Expires header.
 func (r *SIPRequest) Expires() int {
 	expires := 3600 // Default expires

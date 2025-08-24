@@ -18,6 +18,15 @@ type Registration struct {
 	ExpiresAt  time.Time
 }
 
+// SessionState holds the state for a session with an active session timer.
+type SessionState struct {
+	DialogID  string
+	Interval  int
+	ExpiresAt time.Time
+	Refresher string // "uac" or "uas"
+	timer     *time.Timer
+}
+
 // SIPServer holds the dependencies for the SIP server.
 type SIPServer struct {
 	storage        *storage.Storage
@@ -30,6 +39,8 @@ type SIPServer struct {
 	listenAddr     string // The address this server is listening on, e.g., "1.2.3.4:5060"
 	proxiedTxs     map[string]ClientTransaction
 	proxiedTxMutex sync.RWMutex
+	sessions       map[string]*SessionState
+	sessionMutex   sync.RWMutex
 }
 
 // NewSIPServer creates a new SIP server instance.
@@ -41,7 +52,14 @@ func NewSIPServer(s *storage.Storage, realm string) *SIPServer {
 		nonces:        make(map[string]time.Time),
 		realm:         realm,
 		proxiedTxs:    make(map[string]ClientTransaction),
+		sessions:      make(map[string]*SessionState),
 	}
+}
+
+// getDialogID generates a unique identifier for a dialog.
+// The order of tags is important for lookup.
+func getDialogID(callID, fromTag, toTag string) string {
+	return fmt.Sprintf("%s:%s:%s", callID, fromTag, toTag)
 }
 
 // Run starts the SIP server listening on a UDP port.
@@ -184,7 +202,7 @@ func (s *SIPServer) handleRequest(pc net.PacketConn, rawMsg string, remoteAddr n
 	switch req.Method {
 	case "REGISTER":
 		srvTx, err = NewNonInviteServerTx(req, pc, remoteAddr, "UDP")
-	case "INVITE":
+	case "INVITE", "UPDATE":
 		srvTx, err = NewInviteServerTx(req, pc, remoteAddr, "UDP")
 	case "BYE":
 		srvTx, err = NewNonInviteServerTx(req, pc, remoteAddr, "UDP")
@@ -212,9 +230,7 @@ func (s *SIPServer) handleTransaction(srvTx ServerTransaction, pc net.PacketConn
 			if err := srvTx.Respond(res); err != nil {
 				log.Printf("Error sending response to transaction %s: %v", srvTx.ID(), err)
 			}
-		case "INVITE":
-			fallthrough
-		case "BYE":
+		case "INVITE", "BYE", "UPDATE":
 			s.doProxy(req, srvTx, pc)
 		default:
 			res := BuildResponse(405, "Method Not Allowed", req, nil)
@@ -230,6 +246,41 @@ func (s *SIPServer) handleTransaction(srvTx ServerTransaction, pc net.PacketConn
 // the request as an initial request (using the registrar) or as an in-dialog
 // request (using the Route header).
 func (s *SIPServer) doProxy(originalReq *SIPRequest, upstreamTx ServerTransaction, pc net.PacketConn) {
+	// Session Timer Logic - Section 8.1 of RFC 4028
+	if originalReq.Method == "INVITE" || originalReq.Method == "UPDATE" {
+		const proxyMinSE = 1800 // 30 minutes, as recommended.
+
+		se, err := originalReq.SessionExpires()
+		if err != nil {
+			upstreamTx.Respond(BuildResponse(400, "Bad Request", originalReq, map[string]string{"Warning": "Malformed Session-Expires header"}))
+			return
+		}
+
+		if se != nil { // A session timer has been requested.
+			if se.Delta < proxyMinSE {
+				supportedHeader := originalReq.GetHeader("Supported")
+				if strings.Contains(strings.ToLower(supportedHeader), "timer") {
+					log.Printf("Session-Expires %d is too small. Rejecting with 422.", se.Delta)
+					extraHeaders := map[string]string{"Min-SE": strconv.Itoa(proxyMinSE)}
+					upstreamTx.Respond(BuildResponse(422, "Session Interval Too Small", originalReq, extraHeaders))
+					return
+				} else {
+					// UAC is not timer-aware, so we must not reject.
+					// Instead, we modify the request before forwarding.
+					minSEVal, _ := originalReq.MinSE() // -1 if not present
+					if minSEVal < proxyMinSE {
+						originalReq.Headers["Min-SE"] = strconv.Itoa(proxyMinSE)
+						minSEVal = proxyMinSE
+					}
+
+					if se.Delta < minSEVal {
+						originalReq.Headers["Session-Expires"] = strconv.Itoa(minSEVal)
+					}
+				}
+			}
+		}
+	}
+
 	if routeHeader := originalReq.GetHeader("Route"); routeHeader != "" {
 		s.proxyRoutedRequest(originalReq, upstreamTx, pc)
 	} else {
@@ -284,7 +335,7 @@ func (s *SIPServer) proxyRoutedRequest(originalReq *SIPRequest, upstreamTx Serve
 	// 4. Create appropriate client transaction
 	var clientTx ClientTransaction
 	switch fwdReq.Method {
-	case "INVITE":
+	case "INVITE", "UPDATE":
 		clientTx, err = NewInviteClientTx(fwdReq, pc, destAddr, "UDP")
 	default:
 		clientTx, err = NewNonInviteClientTx(fwdReq, pc, destAddr, "UDP")
@@ -298,7 +349,7 @@ func (s *SIPServer) proxyRoutedRequest(originalReq *SIPRequest, upstreamTx Serve
 	// 5. Forward and stitch responses
 	s.txManager.Add(clientTx)
 	log.Printf("Proxying routed %s from %s to %s via client tx %s", fwdReq.Method, fwdReq.GetHeader("From"), fwdReq.GetHeader("To"), clientTx.ID())
-	s.forwardAndStitch(upstreamTx, clientTx)
+	s.forwardAndStitch(upstreamTx, clientTx, pc, destAddr, fwdReq.URI)
 }
 
 // prepareForwardedRoutedRequest prepares an in-dialog request for forwarding.
@@ -344,6 +395,15 @@ func (s *SIPServer) prepareForwardedRoutedRequest(req *SIPRequest) *SIPRequest {
 		fwdReq.Headers["Route"] = strings.Join(trimmedRoutes[1:], ", ")
 	} else {
 		delete(fwdReq.Headers, "Route")
+	}
+
+	// Add Supported: timer to indicate this proxy supports session timers.
+	if existing, ok := fwdReq.Headers["Supported"]; ok {
+		if !strings.Contains(strings.ToLower(existing), "timer") {
+			fwdReq.Headers["Supported"] = "timer, " + existing
+		}
+	} else {
+		fwdReq.Headers["Supported"] = "timer"
 	}
 
 	return fwdReq
@@ -450,7 +510,7 @@ func (s *SIPServer) proxyInitialRequest(originalReq *SIPRequest, upstreamTx Serv
 
 	var clientTx ClientTransaction
 	switch fwdReq.Method {
-	case "INVITE":
+	case "INVITE", "UPDATE":
 		clientTx, err = NewInviteClientTx(fwdReq, pc, destAddr, "UDP")
 	default:
 		clientTx, err = NewNonInviteClientTx(fwdReq, pc, destAddr, "UDP")
@@ -464,12 +524,13 @@ func (s *SIPServer) proxyInitialRequest(originalReq *SIPRequest, upstreamTx Serv
 	s.txManager.Add(clientTx)
 	log.Printf("Proxying initial %s from %s to %s via client tx %s", originalReq.Method, originalReq.GetHeader("From"), originalReq.GetHeader("To"), clientTx.ID())
 
-	s.forwardAndStitch(upstreamTx, clientTx)
+	s.forwardAndStitch(upstreamTx, clientTx, pc, destAddr, registration.ContactURI)
 }
 
 // forwardAndStitch handles the forwarding of a request via a client transaction
-// and stitches the response back to the upstream server transaction.
-func (s *SIPServer) forwardAndStitch(upstreamTx ServerTransaction, clientTx ClientTransaction) {
+// and stitches the response back to the upstream server transaction. It also handles
+// retries for session timer negotiation (422 responses).
+func (s *SIPServer) forwardAndStitch(upstreamTx ServerTransaction, clientTx ClientTransaction, pc net.PacketConn, destAddr *net.UDPAddr, nextHopURI string) {
 	s.proxiedTxMutex.Lock()
 	s.proxiedTxs[upstreamTx.ID()] = clientTx
 	s.proxiedTxMutex.Unlock()
@@ -481,13 +542,60 @@ func (s *SIPServer) forwardAndStitch(upstreamTx ServerTransaction, clientTx Clie
 			s.proxiedTxMutex.Unlock()
 		}()
 
-		for {
+		currentClientTx := clientTx
+		maxRetries := 5
+		maxMinSE := 0
+
+		for i := 0; i < maxRetries; i++ {
 			select {
-			case res := <-clientTx.Responses():
+			case res := <-currentClientTx.Responses():
 				if res == nil {
 					continue
 				}
-				log.Printf("Proxy received response for tx %s: %d %s", clientTx.ID(), res.StatusCode, res.Reason)
+
+				if res.StatusCode == 422 && currentClientTx.OriginalRequest().Method == "INVITE" {
+					log.Printf("Proxy received 422 for tx %s. Retrying...", currentClientTx.ID())
+					currentClientTx.Terminate()
+
+					minSE, err := res.MinSE()
+					if err != nil || minSE <= 0 {
+						log.Printf("422 response has invalid or missing Min-SE header. Aborting.")
+						upstreamTx.Respond(BuildResponse(500, "Server Internal Error", upstreamTx.OriginalRequest(), nil))
+						return
+					}
+					if minSE > maxMinSE {
+						maxMinSE = minSE
+					}
+
+					cseqStr := currentClientTx.OriginalRequest().GetHeader("CSeq")
+					cseq, method, ok := parseCSeq(cseqStr)
+					if !ok {
+						log.Printf("Could not parse CSeq from forwarded request. Aborting.")
+						upstreamTx.Respond(BuildResponse(500, "Server Internal Error", upstreamTx.OriginalRequest(), nil))
+						return
+					}
+
+					newFwdReq := s.prepareForwardedRequest(upstreamTx.OriginalRequest(), nextHopURI)
+					newFwdReq.Headers["CSeq"] = fmt.Sprintf("%d %s", cseq+1, method)
+					newFwdReq.Headers["Min-SE"] = strconv.Itoa(maxMinSE)
+					newFwdReq.Headers["Session-Expires"] = strconv.Itoa(maxMinSE)
+
+					newClientTx, err := NewInviteClientTx(newFwdReq, pc, destAddr, "UDP")
+					if err != nil {
+						log.Printf("Failed to create client transaction for retry: %v", err)
+						upstreamTx.Respond(BuildResponse(500, "Server Internal Error", upstreamTx.OriginalRequest(), nil))
+						return
+					}
+					s.txManager.Add(newClientTx)
+					s.proxiedTxMutex.Lock()
+					s.proxiedTxs[upstreamTx.ID()] = newClientTx
+					s.proxiedTxMutex.Unlock()
+
+					currentClientTx = newClientTx
+					continue
+				}
+
+				log.Printf("Proxy received response for tx %s: %d %s", currentClientTx.ID(), res.StatusCode, res.Reason)
 
 				topVia, err := res.TopVia()
 				if err != nil {
@@ -495,25 +603,66 @@ func (s *SIPServer) forwardAndStitch(upstreamTx ServerTransaction, clientTx Clie
 					continue
 				}
 
-				if topVia.Branch() == clientTx.ID() {
+				if res.StatusCode >= 200 && res.StatusCode < 300 && (upstreamTx.OriginalRequest().Method == "INVITE" || upstreamTx.OriginalRequest().Method == "UPDATE") {
+					uacSupportsTimer := strings.Contains(strings.ToLower(upstreamTx.OriginalRequest().GetHeader("Supported")), "timer")
+					respSE, _ := res.SessionExpires()
+
+					if respSE != nil {
+						s.createOrUpdateSession(upstreamTx, res, respSE)
+					} else {
+						if uacSupportsTimer {
+							reqSE, _ := upstreamTx.OriginalRequest().SessionExpires()
+							if reqSE != nil {
+								log.Printf("UAS doesn't support session timer, but UAC does. Inserting Session-Expires header into 2xx response.")
+								res.Headers["Session-Expires"] = fmt.Sprintf("%d;refresher=uac", reqSE.Delta)
+								if existing, ok := res.Headers["Require"]; ok {
+									if !strings.Contains(strings.ToLower(existing), "timer") {
+										res.Headers["Require"] = "timer, " + existing
+									}
+								} else {
+									res.Headers["Require"] = "timer"
+								}
+								finalSE, _ := res.SessionExpires()
+								s.createOrUpdateSession(upstreamTx, res, finalSE)
+							}
+						}
+					}
+				}
+
+				if topVia.Branch() == currentClientTx.ID() {
 					res.PopVia()
 				} else {
-					log.Printf("WARN: Top Via branch '%s' in response did not match client tx branch '%s'. Not stripping Via.", topVia.Branch(), clientTx.ID())
+					log.Printf("WARN: Top Via branch '%s' in response did not match client tx branch '%s'. Not stripping Via.", topVia.Branch(), currentClientTx.ID())
 				}
 				upstreamTx.Respond(res)
 				if res.StatusCode >= 200 {
 					return
 				}
-			case <-clientTx.Done():
-				log.Printf("Client transaction %s terminated.", clientTx.ID())
+			case <-currentClientTx.Done():
+				log.Printf("Client transaction %s terminated.", currentClientTx.ID())
 				return
 			case <-upstreamTx.Done():
 				log.Printf("Upstream transaction %s terminated. Terminating downstream.", upstreamTx.ID())
-				clientTx.Terminate()
+				currentClientTx.Terminate()
 				return
 			}
 		}
+		log.Printf("Exceeded max retries for session timer negotiation for tx %s", upstreamTx.ID())
+		upstreamTx.Respond(BuildResponse(500, "Server Internal Error", upstreamTx.OriginalRequest(), map[string]string{"Warning": "Session timer negotiation failed"}))
 	}()
+}
+
+// parseCSeq is a helper to extract number and method from CSeq header.
+func parseCSeq(cseqHeader string) (int, string, bool) {
+	parts := strings.SplitN(strings.TrimSpace(cseqHeader), " ", 2)
+	if len(parts) != 2 {
+		return 0, "", false
+	}
+	cseq, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return 0, "", false
+	}
+	return cseq, parts[1], true
 }
 
 // prepareForwardedRequest creates a copy of a request suitable for forwarding.
@@ -554,6 +703,16 @@ func (s *SIPServer) prepareForwardedRequest(req *SIPRequest, targetURI string) *
 	} else {
 		fwdReq.Headers["Record-Route"] = recordRoute
 	}
+
+	// Add Supported: timer to indicate this proxy supports session timers.
+	if existing, ok := fwdReq.Headers["Supported"]; ok {
+		if !strings.Contains(strings.ToLower(existing), "timer") {
+			fwdReq.Headers["Supported"] = "timer, " + existing
+		}
+	} else {
+		fwdReq.Headers["Supported"] = "timer"
+	}
+
 	return fwdReq
 }
 
@@ -767,4 +926,64 @@ func createCancelRequest(inviteReq *SIPRequest) *SIPRequest {
 	}
 	cancelReq.Headers["Max-Forwards"] = "70"
 	return cancelReq
+}
+
+func getTag(headerValue string) string {
+	parts := strings.Split(headerValue, ";")
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if strings.HasPrefix(part, "tag=") {
+			return strings.TrimPrefix(part, "tag=")
+		}
+	}
+	return ""
+}
+
+func (s *SIPServer) createOrUpdateSession(upstreamTx ServerTransaction, finalResponse *SIPResponse, se *SessionExpires) {
+	if se == nil || se.Refresher == "" {
+		return
+	}
+
+	callID := finalResponse.GetHeader("Call-ID")
+	fromTag := getTag(finalResponse.GetHeader("From"))
+	toTag := getTag(finalResponse.GetHeader("To"))
+
+	if callID == "" || fromTag == "" || toTag == "" {
+		log.Printf("Cannot create session state: missing Call-ID or tags in 2xx response.")
+		return
+	}
+
+	dialogID := getDialogID(callID, fromTag, toTag)
+
+	s.sessionMutex.Lock()
+	defer s.sessionMutex.Unlock()
+
+	if existingSession, ok := s.sessions[dialogID]; ok {
+		existingSession.timer.Stop()
+	}
+
+	session := &SessionState{
+		DialogID:  dialogID,
+		Interval:  se.Delta,
+		ExpiresAt: time.Now().Add(time.Duration(se.Delta) * time.Second),
+		Refresher: se.Refresher,
+	}
+
+	log.Printf("Session timer established for dialog %s. Interval: %d, Refresher: %s", dialogID, session.Interval, session.Refresher)
+
+	session.timer = time.AfterFunc(time.Duration(session.Interval)*time.Second, func() {
+		s.expireSession(dialogID)
+	})
+
+	s.sessions[dialogID] = session
+}
+
+func (s *SIPServer) expireSession(dialogID string) {
+	s.sessionMutex.Lock()
+	defer s.sessionMutex.Unlock()
+
+	if _, ok := s.sessions[dialogID]; ok {
+		log.Printf("Session timer expired for dialog %s. Removing state.", dialogID)
+		delete(s.sessions, dialogID)
+	}
 }
