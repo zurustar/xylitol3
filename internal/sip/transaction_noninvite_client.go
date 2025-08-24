@@ -18,16 +18,23 @@ const (
 
 // NonInviteClientTx implements the client-side non-INVITE transaction state machine.
 type NonInviteClientTx struct {
-	id        string
-	request   *SIPRequest
-	state     NonInviteClientTxState
-	mu        sync.RWMutex
-	timerE    *time.Timer
-	timerF    *time.Timer
-	timerK    *time.Timer
-	done      chan bool
-	responses chan *SIPResponse
-	transport Transport
+	id           string
+	request      *SIPRequest
+	state        NonInviteClientTxState
+	mu           sync.RWMutex
+	timerE       *time.Timer
+	timerF       *time.Timer
+	timerK       *time.Timer
+	done         chan bool
+	responses    chan *SIPResponse
+	transport    Transport
+	lastResponse *SIPResponse
+}
+
+func (tx *NonInviteClientTx) LastResponse() *SIPResponse {
+	tx.mu.RLock()
+	defer tx.mu.RUnlock()
+	return tx.lastResponse
 }
 
 func NewNonInviteClientTx(req *SIPRequest, transport Transport) (ClientTransaction, error) {
@@ -73,6 +80,7 @@ func (tx *NonInviteClientTx) Terminate() {
 
 func (tx *NonInviteClientTx) ReceiveResponse(res *SIPResponse) {
 	tx.mu.Lock()
+	tx.lastResponse = res
 	if tx.state == NonInviteClientTxStateTerminated || tx.state == NonInviteClientTxStateCompleted {
 		tx.mu.Unlock()
 		return
