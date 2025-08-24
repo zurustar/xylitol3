@@ -261,6 +261,12 @@ func (b *B2BUA) mediate(bLegTx ClientTransaction, aLegTx ServerTransaction) {
 				if res.StatusCode < 300 {
 					// Call was successful, set up dialog state.
 					b.establishDialogs(aLegRes, res)
+
+					// Activate the session timer if it was negotiated.
+					if se, err := aLegRes.SessionExpires(); err == nil && se != nil {
+						b.server.createOrUpdateSession(aLegTx, aLegRes, se)
+					}
+
 					// Wait for in-dialog messages
 					b.waitForDialogMessages()
 				}
