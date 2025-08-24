@@ -34,6 +34,16 @@ func GenerateNonce(n int) string {
 	return hex.EncodeToString(b)
 }
 
+// GenerateCallID generates a new random Call-ID.
+func GenerateCallID() string {
+	return GenerateNonce(16)
+}
+
+// GenerateTag generates a new random tag for From/To headers.
+func GenerateTag() string {
+	return GenerateNonce(8)
+}
+
 // isReliable checks if the given transport protocol is reliable (e.g., TCP, SCTP, TLS).
 func isReliable(proto string) bool {
 	switch strings.ToUpper(proto) {
@@ -69,6 +79,7 @@ type ClientTransaction interface {
 	Responses() <-chan *SIPResponse
 	ReceiveResponse(*SIPResponse)
 	OriginalRequest() *SIPRequest
+	LastResponse() *SIPResponse
 }
 
 // --- Transaction Manager ---

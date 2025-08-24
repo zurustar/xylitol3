@@ -33,32 +33,33 @@ type SessionState struct {
 
 // SIPServer holds the dependencies for the SIP server.
 type SIPServer struct {
-	storage         *storage.Storage
-	txManager       *TransactionManager
-	registrations   map[string][]Registration
-	regMutex        sync.RWMutex
-	nonces          map[string]time.Time
-	nonceMutex      sync.Mutex
-	realm           string
-	listenAddr      string // The address this server is listening on, e.g., "1.2.3.4:5060"
-	sessions        map[string]*SessionState
-	sessionMutex    sync.RWMutex
-	forkingProxies  map[string]*ForkingProxy
-	forkingMutex    sync.RWMutex
-	udpConn         net.PacketConn
-	tcpListener     *net.TCPListener
+	storage       *storage.Storage
+	txManager     *TransactionManager
+	registrations map[string][]Registration
+	regMutex      sync.RWMutex
+	nonces        map[string]time.Time
+	nonceMutex    sync.Mutex
+	realm         string
+	listenAddr    string // The address this server is listening on, e.g., "1.2.3.4:5060"
+	sessions      map[string]*SessionState
+	sessionMutex  sync.RWMutex
+	dialogs       sync.Map // Stores active B2BUA dialogs, keyed by dialog ID
+	b2buaByTx     map[string]*B2BUA // Keyed by A-leg transaction ID
+	b2buaMutex    sync.RWMutex
+	udpConn       net.PacketConn
+	tcpListener   *net.TCPListener
 }
 
 // NewSIPServer creates a new SIP server instance.
 func NewSIPServer(s *storage.Storage, realm string) *SIPServer {
 	return &SIPServer{
-		storage:        s,
-		txManager:      NewTransactionManager(),
-		registrations:  make(map[string][]Registration),
-		nonces:         make(map[string]time.Time),
-		realm:          realm,
-		sessions:       make(map[string]*SessionState),
-		forkingProxies: make(map[string]*ForkingProxy),
+		storage:       s,
+		txManager:     NewTransactionManager(),
+		registrations: make(map[string][]Registration),
+		nonces:        make(map[string]time.Time),
+		realm:         realm,
+		sessions:      make(map[string]*SessionState),
+		b2buaByTx:     make(map[string]*B2BUA),
 	}
 }
 
@@ -312,34 +313,46 @@ func (s *SIPServer) handleRequest(transport Transport, rawMsg string) {
 		}
 	}
 
-	// Per RFC 3261, CANCEL and ACK are special hop-by-hop requests.
-	// They are handled outside of the standard transaction state machines.
+	// For in-dialog requests (except for initial INVITE), we need to find the B2BUA.
+	if req.Method != "INVITE" {
+		// This is a simplified dialog lookup. A robust implementation would handle loose routing.
+		dialogID := getDialogID(req.GetHeader("Call-ID"), getTag(req.GetHeader("From")), getTag(req.GetHeader("To")))
+		if val, ok := s.dialogs.Load(dialogID); ok {
+			b2bua := val.(*B2BUA)
+			// These requests need a transaction to be handled statefully by the B2BUA.
+			srvTx, err := NewNonInviteServerTx(req, transport)
+			if err != nil {
+				log.Printf("Error creating server transaction for in-dialog request: %v", err)
+				return
+			}
+			s.txManager.Add(srvTx)
+			b2bua.HandleInDialogRequest(req, srvTx)
+			return
+		}
+	}
+
+	// Per RFC 3261, CANCEL is a special hop-by-hop request.
 	if req.Method == "CANCEL" {
 		s.handleCancel(transport, req)
 		return
 	}
+
+	// ACK for a non-2xx response might not have a dialog yet.
 	if req.Method == "ACK" {
-		// ACKs for 2xx responses are hop-by-hop and stateless from a transaction perspective.
-		// They must be routed based on the Route header.
-		if req.GetHeader("Route") != "" {
-			s.proxyAckRequest(req, transport)
-		} else {
-			// This could be an ACK for a non-2xx response that was retransmitted to us.
-			// Find the transaction and pass it the ACK.
-			topVia, err := req.TopVia()
-			if err == nil {
-				if tx, ok := s.txManager.Get(topVia.Branch()); ok {
-					if srvTx, ok := tx.(*InviteServerTx); ok {
-						log.Printf("Passing ACK to Invite Server Tx %s", srvTx.ID())
-						srvTx.Receive(req)
-						return
-					}
+		topVia, err := req.TopVia()
+		if err == nil {
+			if tx, ok := s.txManager.Get(topVia.Branch()); ok {
+				if srvTx, ok := tx.(*InviteServerTx); ok {
+					log.Printf("Passing ACK for non-2xx response to Invite Server Tx %s", srvTx.ID())
+					srvTx.Receive(req)
+					return
 				}
 			}
-			log.Printf("Received ACK without Route header and no matching transaction. Assuming stray and dropping.")
 		}
+		log.Printf("Received ACK that did not match any transaction or dialog. Dropping.")
 		return
 	}
+
 
 	topVia, err := req.TopVia()
 	if err != nil {
@@ -397,9 +410,10 @@ func (s *SIPServer) handleTransaction(srvTx ServerTransaction) {
 			if err := srvTx.Respond(res); err != nil {
 				log.Printf("Error sending response to transaction %s: %v", srvTx.ID(), err)
 			}
-		case "INVITE", "BYE", "UPDATE":
-			s.doProxy(req, srvTx)
+		case "INVITE", "UPDATE":
+			s.handleInvite(req, srvTx)
 		default:
+			// BYE and other in-dialog methods are handled in handleRequest
 			res := BuildResponse(405, "Method Not Allowed", req, nil)
 			if err := srvTx.Respond(res); err != nil {
 				log.Printf("Error sending response to transaction %s: %v", srvTx.ID(), err)
@@ -409,371 +423,32 @@ func (s *SIPServer) handleTransaction(srvTx ServerTransaction) {
 	}
 }
 
-// doProxy is a dispatcher for stateful proxy logic. It decides whether to handle
-// the request as an initial request (using the registrar) or as an in-dialog
-// request (using the Route header).
-func (s *SIPServer) doProxy(originalReq *SIPRequest, upstreamTx ServerTransaction) {
-	// RFC 3261 Section 16.3, item 5: Proxy-Require
-	if proxyRequire := originalReq.GetHeader("Proxy-Require"); proxyRequire != "" {
-		// This proxy doesn't support any extensions.
-		log.Printf("Rejecting request with unsupported Proxy-Require: %s", proxyRequire)
-		extraHeaders := map[string]string{"Unsupported": proxyRequire}
-		upstreamTx.Respond(BuildResponse(420, "Bad Extension", originalReq, extraHeaders))
-		return
-	}
-
-	// RFC 3261 Section 16.4: Route Information Preprocessing (maddr)
-	parsedURI, err := ParseSIPURI(originalReq.URI)
-	if err == nil { // Only proceed if URI parsing was successful
-		if maddr, ok := parsedURI.Params["maddr"]; ok {
-			listenHost, _, err := net.SplitHostPort(s.listenAddr)
-			if err != nil {
-				// Fallback for addresses without a port, though listenAddr should always have one.
-				listenHost = s.listenAddr
-			}
-
-			// Check if maddr matches our host or realm.
-			if maddr == listenHost || maddr == s.realm {
-				log.Printf("Request-URI has maddr '%s' matching this proxy. Stripping it.", maddr)
-				delete(parsedURI.Params, "maddr")
-				originalReq.URI = parsedURI.String()
-			}
-		}
-	}
-
-	// Session Timer Logic - Section 8.1 of RFC 4028
-	if originalReq.Method == "INVITE" || originalReq.Method == "UPDATE" {
-		const proxyMinSE = 1800 // 30 minutes, as recommended.
-
-		se, err := originalReq.SessionExpires()
-		if err != nil {
-			upstreamTx.Respond(BuildResponse(400, "Bad Request", originalReq, map[string]string{"Warning": "Malformed Session-Expires header"}))
+// handleInvite decides whether to start a B2BUA for a new call or
+// pass a re-INVITE to an existing dialog.
+func (s *SIPServer) handleInvite(req *SIPRequest, tx ServerTransaction) {
+	// A re-INVITE will have a To-tag. An initial INVITE will not.
+	if getTag(req.GetHeader("To")) != "" {
+		dialogID := getDialogID(req.GetHeader("Call-ID"), getTag(req.GetHeader("From")), getTag(req.GetHeader("To")))
+		if val, ok := s.dialogs.Load(dialogID); ok {
+			b2bua := val.(*B2BUA)
+			log.Printf("Passing re-INVITE to existing B2BUA for dialog %s", dialogID)
+			b2bua.HandleInDialogRequest(req, tx)
 			return
 		}
-
-		if se != nil { // A session timer has been requested.
-			if se.Delta < proxyMinSE {
-				supportedHeader := originalReq.GetHeader("Supported")
-				if strings.Contains(strings.ToLower(supportedHeader), "timer") {
-					log.Printf("Session-Expires %d is too small. Rejecting with 422.", se.Delta)
-					extraHeaders := map[string]string{"Min-SE": strconv.Itoa(proxyMinSE)}
-					upstreamTx.Respond(BuildResponse(422, "Session Interval Too Small", originalReq, extraHeaders))
-					return
-				} else {
-					// UAC is not timer-aware, so we must not reject.
-					// Instead, we modify the request before forwarding.
-					minSEVal, _ := originalReq.MinSE() // -1 if not present
-					if minSEVal < proxyMinSE {
-						originalReq.Headers["Min-SE"] = strconv.Itoa(proxyMinSE)
-						minSEVal = proxyMinSE
-					}
-
-					if se.Delta < minSEVal {
-						originalReq.Headers["Session-Expires"] = strconv.Itoa(minSEVal)
-					}
-				}
-			}
-		}
-	}
-
-	if routeHeader := originalReq.GetHeader("Route"); routeHeader != "" {
-		s.proxyRoutedRequest(originalReq, upstreamTx)
-	} else {
-		s.proxyInitialRequest(originalReq, upstreamTx)
-	}
-}
-
-// proxyRoutedRequest handles stateful forwarding of in-dialog requests that contain a Route header.
-func (s *SIPServer) proxyRoutedRequest(originalReq *SIPRequest, upstreamTx ServerTransaction) {
-	log.Printf("Routing in-dialog %s request", originalReq.Method)
-	var err error
-
-	// 1. Validate Route header points to this proxy
-	routeHeader := originalReq.GetHeader("Route")
-	routes := strings.Split(routeHeader, ",") // Naive split, but ok for now
-	topRoute := strings.TrimSpace(routes[0])
-
-	if !strings.Contains(topRoute, s.listenAddr) {
-		log.Printf("Received routed request not destined for this proxy. Top Route: %s, My Addr: %s", topRoute, s.listenAddr)
-		upstreamTx.Respond(BuildResponse(403, "Forbidden", originalReq, nil))
+		log.Printf("Received re-INVITE for unknown dialog %s. Rejecting.", dialogID)
+		tx.Respond(BuildResponse(481, "Call/Transaction Does Not Exist", req, nil))
 		return
 	}
 
-	inboundProto := upstreamTx.Transport().GetProto()
-
-	// 2. Prepare the forwarded request (strips our route from the Route header)
-	fwdReq := s.prepareForwardedRoutedRequest(originalReq, inboundProto)
-	if fwdReq == nil {
-		upstreamTx.Respond(BuildResponse(483, "Too Many Hops", originalReq, nil))
-		return
-	}
-
-	// 3. Determine destination from next hop in Route header and handle strict routing
-	var targetURIStr string
-	nextHopRouteHeader := fwdReq.GetHeader("Route")
-	if nextHopRouteHeader != "" {
-		// RFC 16.6 Step 7: The next hop is the first URI in the Route header.
-		nextRoutes := strings.Split(nextHopRouteHeader, ",")
-		firstHop := strings.TrimSpace(nextRoutes[0])
-		targetURIStr = firstHop
-
-		// RFC 16.6 Step 6: Check for strict routing (lr parameter)
-		firstHopURI, err := ParseSIPURI(firstHop)
-		if err != nil {
-			log.Printf("Could not parse next hop Route URI: %v", err)
-			upstreamTx.Respond(BuildResponse(400, "Bad Request", originalReq, map[string]string{"Warning": "Malformed Route header"}))
-			return
-		}
-
-		if _, lrExists := firstHopURI.Params["lr"]; !lrExists {
-			// Strict router detected. Reformat the request as per RFC 16.6, step 6.
-			log.Printf("Next hop %s is a strict router. Reformatting request.", firstHop)
-
-			// The new Request-URI is the strict router's URI.
-			fwdReq.URI = firstHop
-
-			// Update Route header: remaining routes + original Request-URI at the end.
-			remainingRoutes := nextRoutes[1:]
-			finalRoute := append(remainingRoutes, "<"+originalReq.URI+">")
-			fwdReq.Headers["Route"] = strings.Join(finalRoute, ", ")
-		}
-	} else {
-		// Route set is now empty, next hop is the Request-URI.
-		targetURIStr = fwdReq.URI
-	}
-
-	// 4. Resolve destination address
-	destURI, err := ParseSIPURI(targetURIStr)
+	// This is an initial INVITE, so we set up a new B2BUA.
+	toURI, err := req.GetSIPURIHeader("To")
 	if err != nil {
-		log.Printf("Could not parse destination URI '%s': %v", targetURIStr, err)
-		upstreamTx.Respond(BuildResponse(400, "Bad Request", originalReq, map[string]string{"Warning": "Malformed target URI"}))
-		return
-	}
-	destPort := "5060"
-	if destURI.Port != "" {
-		destPort = destURI.Port
-	}
-	destHost := destURI.Host
-
-	// 5. Create appropriate client transaction based on transport
-	var clientTx ClientTransaction
-	var outboundTransport Transport
-	if strings.ToUpper(inboundProto) == "UDP" {
-		destAddr, err := net.ResolveUDPAddr("udp", destHost+":"+destPort)
-		if err != nil {
-			log.Printf("Could not resolve destination UDP address '%s': %v", targetURIStr, err)
-			upstreamTx.Respond(BuildResponse(500, "Server Internal Error", originalReq, nil))
-			return
-		}
-		outboundTransport = NewUDPTransport(s.udpConn, destAddr)
-	} else {
-		destAddr, err := net.ResolveTCPAddr("tcp", destHost+":"+destPort)
-		if err != nil {
-			log.Printf("Could not resolve destination TCP address '%s': %v", targetURIStr, err)
-			upstreamTx.Respond(BuildResponse(500, "Server Internal Error", originalReq, nil))
-			return
-		}
-		conn, err := net.DialTCP("tcp", nil, destAddr)
-		if err != nil {
-			log.Printf("Could not connect to destination TCP address '%s': %v", targetURIStr, err)
-			upstreamTx.Respond(BuildResponse(503, "Service Unavailable", originalReq, nil))
-			return
-		}
-		outboundTransport = NewTCPTransport(conn)
-	}
-
-	switch fwdReq.Method {
-	case "INVITE", "UPDATE":
-		clientTx, err = NewInviteClientTx(fwdReq, outboundTransport)
-	default:
-		clientTx, err = NewNonInviteClientTx(fwdReq, outboundTransport)
-	}
-	if err != nil {
-		log.Printf("Failed to create client transaction for routed request: %v", err)
-		upstreamTx.Respond(BuildResponse(500, "Server Internal Error", originalReq, nil))
-		return
-	}
-
-	// 6. Forward and stitch responses
-	s.txManager.Add(clientTx)
-	log.Printf("Proxying routed %s from %s to %s via client tx %s", fwdReq.Method, fwdReq.GetHeader("From"), fwdReq.GetHeader("To"), clientTx.ID())
-
-	go func() {
-		select {
-		case res := <-clientTx.Responses():
-			if res != nil {
-				log.Printf("Proxy received response for routed tx %s: %d %s", clientTx.ID(), res.StatusCode, res.Reason)
-				res.PopVia()
-				upstreamTx.Respond(res)
-			}
-		case <-clientTx.Done():
-			log.Printf("Routed client transaction %s terminated.", clientTx.ID())
-		case <-upstreamTx.Done():
-			log.Printf("Upstream transaction %s terminated. Terminating downstream routed tx.", upstreamTx.ID())
-			clientTx.Terminate()
-		}
-	}()
-}
-
-// prepareForwardedRoutedRequest prepares an in-dialog request for forwarding.
-// It removes the top Route header, decrements Max-Forwards, and adds a new Via header.
-func (s *SIPServer) prepareForwardedRoutedRequest(req *SIPRequest, proto string) *SIPRequest {
-	fwdReq := &SIPRequest{
-		Method:  req.Method,
-		URI:     req.URI,
-		Proto:   req.Proto,
-		Headers: make(map[string]string),
-		Body:    req.Body,
-	}
-	for k, v := range req.Headers {
-		fwdReq.Headers[k] = v
-	}
-
-	// 1. Decrement Max-Forwards
-	maxForwards := 70
-	if mfStr := req.GetHeader("Max-Forwards"); mfStr != "" {
-		if mf, err := strconv.Atoi(mfStr); err == nil {
-			maxForwards = mf
-		}
-	}
-	if maxForwards <= 1 {
-		return nil // Signal to caller to send 483
-	}
-	fwdReq.Headers["Max-Forwards"] = strconv.Itoa(maxForwards - 1)
-
-	// 2. Add our Via header
-	branch := GenerateBranchID()
-	via := fmt.Sprintf("SIP/2.0/%s %s;branch=%s", strings.ToUpper(proto), s.listenAddr, branch)
-	fwdReq.Headers["Via"] = via + "," + req.GetHeader("Via")
-
-	// 3. Remove our URI from the Route header
-	routeHeader := req.GetHeader("Route")
-	routes := strings.Split(routeHeader, ",")
-	trimmedRoutes := make([]string, 0, len(routes))
-	for _, r := range routes {
-		trimmedRoutes = append(trimmedRoutes, strings.TrimSpace(r))
-	}
-
-	if len(trimmedRoutes) > 1 {
-		fwdReq.Headers["Route"] = strings.Join(trimmedRoutes[1:], ", ")
-	} else {
-		delete(fwdReq.Headers, "Route")
-	}
-
-	// Add Supported: timer to indicate this proxy supports session timers.
-	if existing, ok := fwdReq.Headers["Supported"]; ok {
-		if !strings.Contains(strings.ToLower(existing), "timer") {
-			fwdReq.Headers["Supported"] = "timer, " + existing
-		}
-	} else {
-		fwdReq.Headers["Supported"] = "timer"
-	}
-
-	return fwdReq
-}
-
-// proxyAckRequest handles the stateless forwarding of an in-dialog ACK request.
-func (s *SIPServer) proxyAckRequest(req *SIPRequest, transport Transport) {
-	log.Printf("Routing in-dialog ACK request")
-	var err error
-
-	// 1. Validate Route header points to this proxy
-	routeHeader := req.GetHeader("Route")
-	routes := strings.Split(routeHeader, ",")
-	topRoute := strings.TrimSpace(routes[0])
-	if !strings.Contains(topRoute, s.listenAddr) {
-		log.Printf("Received ACK with Route header not for this proxy. Dropping.")
-		return
-	}
-
-	inboundProto := transport.GetProto()
-	// 2. Prepare the forwarded request (strips our route from the Route header)
-	fwdReq := s.prepareForwardedRoutedRequest(req, inboundProto)
-	if fwdReq == nil {
-		log.Printf("Dropping ACK due to Max-Forwards limit.")
-		return // Can't send a response to an ACK
-	}
-
-	// 3. Determine destination and handle strict routing
-	var targetURIStr string
-	nextHopRouteHeader := fwdReq.GetHeader("Route")
-	if nextHopRouteHeader != "" {
-		nextRoutes := strings.Split(nextHopRouteHeader, ",")
-		firstHop := strings.TrimSpace(nextRoutes[0])
-		targetURIStr = firstHop
-
-		firstHopURI, err := ParseSIPURI(firstHop)
-		if err != nil {
-			log.Printf("Could not parse next hop Route URI for ACK: %v. Dropping.", err)
-			return
-		}
-
-		if _, lrExists := firstHopURI.Params["lr"]; !lrExists {
-			// Strict router detected. Reformat the request.
-			log.Printf("Next hop %s for ACK is a strict router. Reformatting request.", firstHop)
-			fwdReq.URI = firstHop
-			remainingRoutes := nextRoutes[1:]
-			finalRoute := append(remainingRoutes, "<"+req.URI+">")
-			fwdReq.Headers["Route"] = strings.Join(finalRoute, ", ")
-		}
-	} else {
-		targetURIStr = fwdReq.URI
-	}
-
-	// 4. Resolve destination address
-	destURI, err := ParseSIPURI(targetURIStr)
-	if err != nil {
-		log.Printf("Could not parse destination URI for ACK: %v. Dropping.", err)
-		return
-	}
-	destPort := "5060"
-	if destURI.Port != "" {
-		destPort = destURI.Port
-	}
-	destHost := destURI.Host
-
-	// 5. Send it.
-	log.Printf("Proxying ACK to %s:%s via %s", destHost, destPort, inboundProto)
-	if strings.ToUpper(inboundProto) == "UDP" {
-		destAddr, err := net.ResolveUDPAddr("udp", destHost+":"+destPort)
-		if err != nil {
-			log.Printf("Could not resolve destination for ACK: %v. Dropping.", err)
-			return
-		}
-		if _, err = s.udpConn.WriteTo([]byte(fwdReq.String()), destAddr); err != nil {
-			log.Printf("Error sending proxied ACK over UDP: %v", err)
-		}
-	} else {
-		destAddr, err := net.ResolveTCPAddr("tcp", destHost+":"+destPort)
-		if err != nil {
-			log.Printf("Could not resolve destination for ACK: %v. Dropping.", err)
-			return
-		}
-		conn, err := net.DialTCP("tcp", nil, destAddr)
-		if err != nil {
-			log.Printf("Could not connect to destination for ACK: %v", err)
-			return
-		}
-		defer conn.Close()
-		if _, err = conn.Write([]byte(fwdReq.String())); err != nil {
-			log.Printf("Error sending proxied ACK over TCP: %v", err)
-		}
-	}
-}
-
-// proxyInitialRequest is the stateful proxy logic for initial requests (no Route header).
-func (s *SIPServer) proxyInitialRequest(originalReq *SIPRequest, upstreamTx ServerTransaction) {
-	var err error
-
-	var toURI *SIPURI
-	toURI, err = originalReq.GetSIPURIHeader("To")
-	if err != nil {
-		upstreamTx.Respond(BuildResponse(400, "Bad Request", originalReq, map[string]string{"Warning": "Malformed To header"}))
+		tx.Respond(BuildResponse(400, "Bad Request", req, map[string]string{"Warning": "Malformed To header"}))
 		return
 	}
 	if toURI.Host != s.realm {
-		log.Printf("Proxy received request for unknown realm: %s", toURI.Host)
-		upstreamTx.Respond(BuildResponse(404, "Not Found", originalReq, nil))
+		log.Printf("Request for unknown realm: %s", toURI.Host)
+		tx.Respond(BuildResponse(404, "Not Found", req, nil))
 		return
 	}
 
@@ -781,12 +456,12 @@ func (s *SIPServer) proxyInitialRequest(originalReq *SIPRequest, upstreamTx Serv
 	registrations, ok := s.registrations[toURI.User]
 	s.regMutex.RUnlock()
 
-	// Clean up expired registrations before proceeding
 	activeRegistrations := []Registration{}
 	if ok {
 		s.regMutex.Lock()
+		now := time.Now()
 		for _, reg := range registrations {
-			if time.Now().Before(reg.ExpiresAt) {
+			if now.Before(reg.ExpiresAt) {
 				activeRegistrations = append(activeRegistrations, reg)
 			}
 		}
@@ -799,144 +474,21 @@ func (s *SIPServer) proxyInitialRequest(originalReq *SIPRequest, upstreamTx Serv
 	}
 
 	if len(activeRegistrations) == 0 {
-		log.Printf("Proxy lookup failed for user '%s': not registered or all contacts expired", toURI.User)
-		upstreamTx.Respond(BuildResponse(480, "Temporarily Unavailable", originalReq, nil))
+		log.Printf("User '%s' not registered or all contacts expired", toURI.User)
+		tx.Respond(BuildResponse(480, "Temporarily Unavailable", req, nil))
 		return
 	}
 
-	// This is where the forking logic begins.
-	forkingProxy := NewForkingProxy(s, upstreamTx)
-	inboundProto := upstreamTx.Transport().GetProto()
+	targetContact := activeRegistrations[0].ContactURI
+	log.Printf("Found contact for user %s: %s. Setting up B2BUA.", toURI.User, targetContact)
 
-	for _, registration := range activeRegistrations {
-		contactURI, err := ParseSIPURI(registration.ContactURI)
-		if err != nil {
-			log.Printf("Skipping invalid contact URI '%s' for user '%s': %v", registration.ContactURI, toURI.User, err)
-			continue
-		}
+	b2bua := NewB2BUA(s, tx)
+	s.b2buaMutex.Lock()
+	s.b2buaByTx[tx.ID()] = b2bua
+	s.b2buaMutex.Unlock()
 
-		destPort := "5060"
-		if contactURI.Port != "" {
-			destPort = contactURI.Port
-		}
-		destHost := contactURI.Host
-
-		fwdReq := s.prepareForwardedRequest(originalReq, registration.ContactURI, inboundProto)
-		if fwdReq == nil {
-			log.Printf("Could not forward to %s: Max-Forwards limit reached", registration.ContactURI)
-			continue // Try the next registration
-		}
-
-		var clientTx ClientTransaction
-		var outboundTransport Transport
-		if strings.ToUpper(inboundProto) == "UDP" {
-			destAddr, err := net.ResolveUDPAddr("udp", destHost+":"+destPort)
-			if err != nil {
-				log.Printf("Could not resolve destination UDP address '%s': %v", registration.ContactURI, err)
-				continue
-			}
-			outboundTransport = NewUDPTransport(s.udpConn, destAddr)
-		} else {
-			destAddr, err := net.ResolveTCPAddr("tcp", destHost+":"+destPort)
-			if err != nil {
-				log.Printf("Could not resolve destination TCP address '%s': %v", registration.ContactURI, err)
-				continue
-			}
-			conn, err := net.DialTCP("tcp", nil, destAddr)
-			if err != nil {
-				log.Printf("Could not connect to destination TCP address '%s': %v", registration.ContactURI, err)
-				continue
-			}
-			outboundTransport = NewTCPTransport(conn)
-		}
-
-		switch fwdReq.Method {
-		case "INVITE", "UPDATE":
-			clientTx, err = NewInviteClientTx(fwdReq, outboundTransport)
-		default:
-			clientTx, err = NewNonInviteClientTx(fwdReq, outboundTransport)
-		}
-
-		if err != nil {
-			log.Printf("Failed to create client transaction for %s: %v", registration.ContactURI, err)
-			continue
-		}
-
-		s.txManager.Add(clientTx)
-		forkingProxy.AddBranch(clientTx)
-		log.Printf("Proxying initial %s to %s via client tx %s", originalReq.Method, registration.ContactURI, clientTx.ID())
-	}
-
-	// Run the forking proxy in a separate goroutine.
-	s.forkingMutex.Lock()
-	s.forkingProxies[upstreamTx.ID()] = forkingProxy
-	s.forkingMutex.Unlock()
-
-	go forkingProxy.Run(s)
-}
-
-// parseCSeq is a helper to extract number and method from CSeq header.
-func parseCSeq(cseqHeader string) (int, string, bool) {
-	parts := strings.SplitN(strings.TrimSpace(cseqHeader), " ", 2)
-	if len(parts) != 2 {
-		return 0, "", false
-	}
-	cseq, err := strconv.Atoi(parts[0])
-	if err != nil {
-		return 0, "", false
-	}
-	return cseq, parts[1], true
-}
-
-// prepareForwardedRequest creates a copy of a request suitable for forwarding.
-func (s *SIPServer) prepareForwardedRequest(req *SIPRequest, targetURI string, proto string) *SIPRequest {
-	fwdReq := &SIPRequest{
-		Method:  req.Method,
-		URI:     targetURI,
-		Proto:   req.Proto,
-		Headers: make(map[string]string),
-		Body:    req.Body,
-	}
-	for k, v := range req.Headers {
-		fwdReq.Headers[k] = v
-	}
-
-	maxForwards := 70
-	if mfStr := req.GetHeader("Max-Forwards"); mfStr != "" {
-		if mf, err := strconv.Atoi(mfStr); err == nil {
-			maxForwards = mf
-		}
-	}
-	if maxForwards <= 1 {
-		return nil // Should be handled by caller by sending 483
-	}
-	fwdReq.Headers["Max-Forwards"] = strconv.Itoa(maxForwards - 1)
-
-	branch := GenerateBranchID()
-	via := fmt.Sprintf("SIP/2.0/%s %s;branch=%s", strings.ToUpper(proto), s.listenAddr, branch)
-	if existingVia := req.GetHeader("Via"); existingVia != "" {
-		fwdReq.Headers["Via"] = via + "," + existingVia
-	} else {
-		fwdReq.Headers["Via"] = via
-	}
-
-	recordRoute := fmt.Sprintf("<sip:%s;lr>", s.listenAddr)
-	if existing, ok := req.Headers["Record-Route"]; ok {
-		fwdReq.Headers["Record-Route"] = recordRoute + ", " + existing
-	} else {
-		fwdReq.Headers["Record-Route"] = recordRoute
-	}
-
-	// Add Supported: timer to indicate this proxy supports session timers.
-	if existing, ok := fwdReq.Headers["Supported"]; ok {
-		if !strings.Contains(strings.ToLower(existing), "timer") {
-			fwdReq.Headers["Supported"] = "timer, " + existing
-		}
-	} else {
-		fwdReq.Headers["Supported"] = "timer"
-	}
-
-	return fwdReq
+	// The B2BUA is responsible for this transaction from now on.
+	go b2bua.Run(targetContact)
 }
 
 func (s *SIPServer) handleStateless(transport Transport, req *SIPRequest) {
@@ -1119,6 +671,12 @@ func (s *SIPServer) validateNonce(nonce string) bool {
 func (s *SIPServer) handleCancel(transport Transport, req *SIPRequest) {
 	log.Printf("Handling CANCEL request for Call-ID %s", req.GetHeader("Call-ID"))
 
+	// Immediately respond 200 OK to the CANCEL request, as per RFC 3261.
+	res200 := BuildResponse(200, "OK", req, nil)
+	if _, err := transport.Write([]byte(res200.String())); err != nil {
+		log.Printf("Error sending 200 OK for CANCEL: %v", err)
+	}
+
 	topVia, err := req.TopVia()
 	if err != nil {
 		log.Printf("Could not get Via from CANCEL request: %v", err)
@@ -1126,55 +684,16 @@ func (s *SIPServer) handleCancel(transport Transport, req *SIPRequest) {
 	}
 	branchID := topVia.Branch()
 
-	tx, ok := s.txManager.Get(branchID)
-	if !ok {
-		// If the original server transaction is not found, it likely has already been
-		// completed and terminated. Per RFC 3261 Section 16.8, the proxy must
-		// still respond 200 OK to the CANCEL.
-		log.Printf("Could not find transaction %s to cancel. Responding 200 OK statelessly.", branchID)
-		res200 := BuildResponse(200, "OK", req, nil)
-		if _, err := transport.Write([]byte(res200.String())); err != nil {
-			log.Printf("Error sending 200 OK for CANCEL: %v", err)
-		}
-		return
-	}
-
-	srvTx, isServerTx := tx.(ServerTransaction)
-	if !isServerTx {
-		log.Printf("Transaction %s found, but it is not a server transaction. Cannot process CANCEL.", branchID)
-		// Still respond 200 OK to the CANCEL as we've consumed it.
-		res200 := BuildResponse(200, "OK", req, nil)
-		if _, err := transport.Write([]byte(res200.String())); err != nil {
-			log.Printf("Error sending 200 OK for CANCEL: %v", err)
-		}
-		return
-	}
-
-	// Immediately respond 200 OK to the CANCEL request.
-	res200 := BuildResponse(200, "OK", req, nil)
-	log.Printf("Sending 200 OK for CANCEL to %s", transport.GetRemoteAddr())
-	if _, err := transport.Write([]byte(res200.String())); err != nil {
-		log.Printf("Error sending 200 OK for CANCEL: %v", err)
-	}
-
-	// Find the forking proxy associated with this transaction and tell it to finish.
-	s.forkingMutex.RLock()
-	proxy, ok := s.forkingProxies[branchID]
-	s.forkingMutex.RUnlock()
+	s.b2buaMutex.RLock()
+	b2bua, ok := s.b2buaByTx[branchID]
+	s.b2buaMutex.RUnlock()
 
 	if ok {
-		log.Printf("Found forking proxy for tx %s, telling it to finish.", branchID)
-		proxy.SetExternallyCancelled()
-		proxy.finishOnce.Do(proxy.finish)
+		log.Printf("Found B2BUA for tx %s, telling it to cancel.", branchID)
+		b2bua.Cancel()
+	} else {
+		log.Printf("Could not find a B2BUA for CANCEL with branch ID %s. The INVITE transaction might have already completed.", branchID)
 	}
-
-	// Respond 487 to the original INVITE.
-	res487 := BuildResponse(487, "Request Terminated", srvTx.OriginalRequest(), nil)
-	if err := srvTx.Respond(res487); err != nil {
-		log.Printf("Error sending 487 response to original INVITE tx %s: %v", branchID, err)
-	}
-
-	// The transaction will terminate itself upon sending the 487 response.
 }
 
 func createCancelRequest(inviteReq *SIPRequest) *SIPRequest {

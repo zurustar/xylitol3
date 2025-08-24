@@ -18,16 +18,23 @@ const (
 
 // InviteClientTx implements the client-side INVITE transaction state machine.
 type InviteClientTx struct {
-	id        string
-	request   *SIPRequest
-	state     InviteClientTxState
-	mu        sync.RWMutex
-	timerA    *time.Timer
-	timerB    *time.Timer
-	timerD    *time.Timer
-	done      chan bool
-	responses chan *SIPResponse
-	transport Transport
+	id           string
+	request      *SIPRequest
+	state        InviteClientTxState
+	mu           sync.RWMutex
+	timerA       *time.Timer
+	timerB       *time.Timer
+	timerD       *time.Timer
+	done         chan bool
+	responses    chan *SIPResponse
+	transport    Transport
+	lastResponse *SIPResponse
+}
+
+func (tx *InviteClientTx) LastResponse() *SIPResponse {
+	tx.mu.RLock()
+	defer tx.mu.RUnlock()
+	return tx.lastResponse
 }
 
 func NewInviteClientTx(req *SIPRequest, transport Transport) (ClientTransaction, error) {
@@ -73,6 +80,7 @@ func (tx *InviteClientTx) Terminate() {
 
 func (tx *InviteClientTx) ReceiveResponse(res *SIPResponse) {
 	tx.mu.Lock()
+	tx.lastResponse = res
 
 	if tx.state == InviteClientTxStateTerminated {
 		tx.mu.Unlock()
