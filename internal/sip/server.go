@@ -246,6 +246,34 @@ func (s *SIPServer) handleTransaction(srvTx ServerTransaction, pc net.PacketConn
 // the request as an initial request (using the registrar) or as an in-dialog
 // request (using the Route header).
 func (s *SIPServer) doProxy(originalReq *SIPRequest, upstreamTx ServerTransaction, pc net.PacketConn) {
+	// RFC 3261 Section 16.3, item 5: Proxy-Require
+	if proxyRequire := originalReq.GetHeader("Proxy-Require"); proxyRequire != "" {
+		// This proxy doesn't support any extensions.
+		log.Printf("Rejecting request with unsupported Proxy-Require: %s", proxyRequire)
+		extraHeaders := map[string]string{"Unsupported": proxyRequire}
+		upstreamTx.Respond(BuildResponse(420, "Bad Extension", originalReq, extraHeaders))
+		return
+	}
+
+	// RFC 3261 Section 16.4: Route Information Preprocessing (maddr)
+	parsedURI, err := ParseSIPURI(originalReq.URI)
+	if err == nil { // Only proceed if URI parsing was successful
+		if maddr, ok := parsedURI.Params["maddr"]; ok {
+			listenHost, _, err := net.SplitHostPort(s.listenAddr)
+			if err != nil {
+				// Fallback for addresses without a port, though listenAddr should always have one.
+				listenHost = s.listenAddr
+			}
+
+			// Check if maddr matches our host or realm.
+			if maddr == listenHost || maddr == s.realm {
+				log.Printf("Request-URI has maddr '%s' matching this proxy. Stripping it.", maddr)
+				delete(parsedURI.Params, "maddr")
+				originalReq.URI = parsedURI.String()
+			}
+		}
+	}
+
 	// Session Timer Logic - Section 8.1 of RFC 4028
 	if originalReq.Method == "INVITE" || originalReq.Method == "UPDATE" {
 		const proxyMinSE = 1800 // 30 minutes, as recommended.
@@ -293,9 +321,9 @@ func (s *SIPServer) proxyRoutedRequest(originalReq *SIPRequest, upstreamTx Serve
 	log.Printf("Routing in-dialog %s request", originalReq.Method)
 	var err error
 
-	// 1. Validate Route header
+	// 1. Validate Route header points to this proxy
 	routeHeader := originalReq.GetHeader("Route")
-	routes := strings.Split(routeHeader, ",") // Naive split
+	routes := strings.Split(routeHeader, ",") // Naive split, but ok for now
 	topRoute := strings.TrimSpace(routes[0])
 
 	if !strings.Contains(topRoute, s.listenAddr) {
@@ -304,19 +332,52 @@ func (s *SIPServer) proxyRoutedRequest(originalReq *SIPRequest, upstreamTx Serve
 		return
 	}
 
-	// 2. Prepare the forwarded request
+	// 2. Prepare the forwarded request (strips our route from the Route header)
 	fwdReq := s.prepareForwardedRoutedRequest(originalReq)
 	if fwdReq == nil {
 		upstreamTx.Respond(BuildResponse(483, "Too Many Hops", originalReq, nil))
 		return
 	}
 
-	// 3. Determine destination address
-	var destURI *SIPURI
-	destURI, err = ParseSIPURI(fwdReq.URI)
+	// 3. Determine destination from next hop in Route header and handle strict routing
+	var targetURIStr string
+	nextHopRouteHeader := fwdReq.GetHeader("Route")
+	if nextHopRouteHeader != "" {
+		// RFC 16.6 Step 7: The next hop is the first URI in the Route header.
+		nextRoutes := strings.Split(nextHopRouteHeader, ",")
+		firstHop := strings.TrimSpace(nextRoutes[0])
+		targetURIStr = firstHop
+
+		// RFC 16.6 Step 6: Check for strict routing (lr parameter)
+		firstHopURI, err := ParseSIPURI(firstHop)
+		if err != nil {
+			log.Printf("Could not parse next hop Route URI: %v", err)
+			upstreamTx.Respond(BuildResponse(400, "Bad Request", originalReq, map[string]string{"Warning": "Malformed Route header"}))
+			return
+		}
+
+		if _, lrExists := firstHopURI.Params["lr"]; !lrExists {
+			// Strict router detected. Reformat the request as per RFC 16.6, step 6.
+			log.Printf("Next hop %s is a strict router. Reformatting request.", firstHop)
+
+			// The new Request-URI is the strict router's URI.
+			fwdReq.URI = firstHop
+
+			// Update Route header: remaining routes + original Request-URI at the end.
+			remainingRoutes := nextRoutes[1:]
+			finalRoute := append(remainingRoutes, "<"+originalReq.URI+">")
+			fwdReq.Headers["Route"] = strings.Join(finalRoute, ", ")
+		}
+	} else {
+		// Route set is now empty, next hop is the Request-URI.
+		targetURIStr = fwdReq.URI
+	}
+
+	// 4. Resolve destination address
+	destURI, err := ParseSIPURI(targetURIStr)
 	if err != nil {
-		log.Printf("Could not parse destination URI for routed request: %v", err)
-		upstreamTx.Respond(BuildResponse(400, "Bad Request", originalReq, map[string]string{"Warning": "Malformed Request-URI"}))
+		log.Printf("Could not parse destination URI '%s': %v", targetURIStr, err)
+		upstreamTx.Respond(BuildResponse(400, "Bad Request", originalReq, map[string]string{"Warning": "Malformed target URI"}))
 		return
 	}
 
@@ -327,12 +388,12 @@ func (s *SIPServer) proxyRoutedRequest(originalReq *SIPRequest, upstreamTx Serve
 	var destAddr *net.UDPAddr
 	destAddr, err = net.ResolveUDPAddr("udp", destURI.Host+":"+destPort)
 	if err != nil {
-		log.Printf("Could not resolve destination URI '%s': %v", fwdReq.URI, err)
+		log.Printf("Could not resolve destination URI '%s': %v", targetURIStr, err)
 		upstreamTx.Respond(BuildResponse(500, "Server Internal Error", originalReq, nil))
 		return
 	}
 
-	// 4. Create appropriate client transaction
+	// 5. Create appropriate client transaction
 	var clientTx ClientTransaction
 	switch fwdReq.Method {
 	case "INVITE", "UPDATE":
@@ -346,7 +407,7 @@ func (s *SIPServer) proxyRoutedRequest(originalReq *SIPRequest, upstreamTx Serve
 		return
 	}
 
-	// 5. Forward and stitch responses
+	// 6. Forward and stitch responses
 	s.txManager.Add(clientTx)
 	log.Printf("Proxying routed %s from %s to %s via client tx %s", fwdReq.Method, fwdReq.GetHeader("From"), fwdReq.GetHeader("To"), clientTx.ID())
 	s.forwardAndStitch(upstreamTx, clientTx, pc, destAddr, fwdReq.URI)
@@ -414,7 +475,7 @@ func (s *SIPServer) proxyAckRequest(req *SIPRequest, pc net.PacketConn, remoteAd
 	log.Printf("Routing in-dialog ACK request")
 	var err error
 
-	// 1. Validate Route header
+	// 1. Validate Route header points to this proxy
 	routeHeader := req.GetHeader("Route")
 	routes := strings.Split(routeHeader, ",")
 	topRoute := strings.TrimSpace(routes[0])
@@ -423,16 +484,41 @@ func (s *SIPServer) proxyAckRequest(req *SIPRequest, pc net.PacketConn, remoteAd
 		return
 	}
 
-	// 2. Prepare the forwarded request
+	// 2. Prepare the forwarded request (strips our route from the Route header)
 	fwdReq := s.prepareForwardedRoutedRequest(req)
 	if fwdReq == nil {
 		log.Printf("Dropping ACK due to Max-Forwards limit.")
 		return // Can't send a response to an ACK
 	}
 
-	// 3. Determine destination
-	var destURI *SIPURI
-	destURI, err = ParseSIPURI(fwdReq.URI)
+	// 3. Determine destination and handle strict routing
+	var targetURIStr string
+	nextHopRouteHeader := fwdReq.GetHeader("Route")
+	if nextHopRouteHeader != "" {
+		nextRoutes := strings.Split(nextHopRouteHeader, ",")
+		firstHop := strings.TrimSpace(nextRoutes[0])
+		targetURIStr = firstHop
+
+		firstHopURI, err := ParseSIPURI(firstHop)
+		if err != nil {
+			log.Printf("Could not parse next hop Route URI for ACK: %v. Dropping.", err)
+			return
+		}
+
+		if _, lrExists := firstHopURI.Params["lr"]; !lrExists {
+			// Strict router detected. Reformat the request.
+			log.Printf("Next hop %s for ACK is a strict router. Reformatting request.", firstHop)
+			fwdReq.URI = firstHop
+			remainingRoutes := nextRoutes[1:]
+			finalRoute := append(remainingRoutes, "<"+req.URI+">")
+			fwdReq.Headers["Route"] = strings.Join(finalRoute, ", ")
+		}
+	} else {
+		targetURIStr = fwdReq.URI
+	}
+
+	// 4. Resolve destination address
+	destURI, err := ParseSIPURI(targetURIStr)
 	if err != nil {
 		log.Printf("Could not parse destination URI for ACK: %v. Dropping.", err)
 		return
@@ -448,7 +534,7 @@ func (s *SIPServer) proxyAckRequest(req *SIPRequest, pc net.PacketConn, remoteAd
 		return
 	}
 
-	// 4. Send it.
+	// 5. Send it.
 	log.Printf("Proxying ACK to %s", destAddr.String())
 	if _, err = pc.WriteTo([]byte(fwdReq.String()), destAddr); err != nil {
 		log.Printf("Error sending proxied ACK: %v", err)
@@ -542,15 +628,56 @@ func (s *SIPServer) forwardAndStitch(upstreamTx ServerTransaction, clientTx Clie
 			s.proxiedTxMutex.Unlock()
 		}()
 
+		isInvite := upstreamTx.OriginalRequest().Method == "INVITE"
+		var timerC *time.Timer
+		if isInvite {
+			// RFC 3261 Section 16.6 Item 11: Set Timer C for INVITE transactions.
+			// It must be larger than 3 minutes.
+			timerC = time.NewTimer(3*time.Minute + 5*time.Second)
+			defer timerC.Stop()
+		}
+		receivedProvisional := false
+
 		currentClientTx := clientTx
 		maxRetries := 5
 		maxMinSE := 0
 
 		for i := 0; i < maxRetries; i++ {
+			var timerCChan <-chan time.Time
+			if timerC != nil {
+				timerCChan = timerC.C
+			}
+
 			select {
+			case <-timerCChan:
+				// RFC 3261 Section 16.8: Processing Timer C
+				log.Printf("Proxy Timer C fired for INVITE tx %s", upstreamTx.ID())
+				if receivedProvisional {
+					log.Printf("Timer C: Provisional response was received. Cancelling downstream transaction.")
+					if inviteClientTx, ok := currentClientTx.(*InviteClientTx); ok {
+						cancelReq := createCancelRequest(inviteClientTx.OriginalRequest())
+						destAddr := inviteClientTx.destAddr
+						log.Printf("Proxying CANCEL for Timer C to %s", destAddr)
+						if _, err := pc.WriteTo([]byte(cancelReq.String()), destAddr); err != nil {
+							log.Printf("Error proxying CANCEL for Timer C: %v", err)
+						}
+					}
+				} else {
+					log.Printf("Timer C: No provisional response received. Responding 408 to upstream.")
+					upstreamTx.Respond(BuildResponse(408, "Request Timeout", upstreamTx.OriginalRequest(), nil))
+				}
+				return // End this goroutine.
+
 			case res := <-currentClientTx.Responses():
 				if res == nil {
 					continue
+				}
+
+				// RFC 3261 Section 16.7 Item 2: Reset timer C on provisional response.
+				if isInvite && res.StatusCode > 100 && res.StatusCode < 200 {
+					log.Printf("Received provisional response for INVITE tx %s, resetting Timer C", upstreamTx.ID())
+					receivedProvisional = true
+					timerC.Reset(3*time.Minute + 5*time.Second)
 				}
 
 				if res.StatusCode == 422 && currentClientTx.OriginalRequest().Method == "INVITE" {
@@ -636,7 +763,7 @@ func (s *SIPServer) forwardAndStitch(upstreamTx ServerTransaction, clientTx Clie
 				}
 				upstreamTx.Respond(res)
 				if res.StatusCode >= 200 {
-					return
+					return // This will trigger the deferred timerC.Stop()
 				}
 			case <-currentClientTx.Done():
 				log.Printf("Client transaction %s terminated.", currentClientTx.ID())
