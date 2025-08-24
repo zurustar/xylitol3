@@ -79,10 +79,10 @@ func TestSipProxy_InviteCancelFlow(t *testing.T) {
 
 	// Manually register Bob so the proxy knows his location
 	bobContactURI := fmt.Sprintf("sip:bob@%s", bob.LocalAddr().String())
-	server.registrations["bob"] = Registration{
+	server.registrations["bob"] = []Registration{{
 		ContactURI: bobContactURI,
 		ExpiresAt:  time.Now().Add(1 * time.Hour),
-	}
+	}}
 
 	// 2. --- INVITE and CANCEL Transaction ---
 	inviteBranch := "z9hG4bK-invite-cancel"

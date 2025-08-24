@@ -99,10 +99,10 @@ func TestSipProxy_SessionTimer_RejectsLowSE(t *testing.T) {
 	defer alice.Close()
 
 	// Register bob so the proxy can find him
-	server.registrations["bob"] = Registration{
+	server.registrations["bob"] = []Registration{{
 		ContactURI: "sip:bob@192.0.2.2:5060",
 		ExpiresAt:  time.Now().Add(time.Hour),
-	}
+	}}
 
 	// --- TEST ---
 	inviteReq := fmt.Sprintf(
@@ -174,10 +174,10 @@ func TestSipProxy_SessionTimer_HandlesDownstream422(t *testing.T) {
 	assert.NoError(t, err)
 	defer bob.Close()
 
-	server.registrations["bob"] = Registration{
+	server.registrations["bob"] = []Registration{{
 		ContactURI: fmt.Sprintf("sip:bob@%s", bob.LocalAddr().String()),
 		ExpiresAt:  time.Now().Add(time.Hour),
-	}
+	}}
 
 	// --- TEST ---
 	// Bob's UAS will reject the first INVITE with 422
@@ -280,10 +280,10 @@ func TestSipProxy_SessionTimer_UASDoesNotSupport(t *testing.T) {
 	assert.NoError(t, err)
 	defer bob.Close()
 
-	server.registrations["bob"] = Registration{
+	server.registrations["bob"] = []Registration{{
 		ContactURI: fmt.Sprintf("sip:bob@%s", bob.LocalAddr().String()),
 		ExpiresAt:  time.Now().Add(time.Hour),
-	}
+	}}
 
 	// --- TEST ---
 	// Bob's UAS will reply 200 OK but without any session timer headers
