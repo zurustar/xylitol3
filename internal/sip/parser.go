@@ -32,6 +32,29 @@ func (r *SIPRequest) String() string {
 	return builder.String()
 }
 
+// Clone creates a deep copy of the SIPRequest.
+func (r *SIPRequest) Clone() *SIPRequest {
+	if r == nil {
+		return nil
+	}
+	clone := &SIPRequest{
+		Method:        r.Method,
+		URI:           r.URI,
+		Proto:         r.Proto,
+		Headers:       make(map[string]string, len(r.Headers)),
+		Authorization: make(map[string]string, len(r.Authorization)),
+		Body:          make([]byte, len(r.Body)),
+	}
+	for k, v := range r.Headers {
+		clone.Headers[k] = v
+	}
+	for k, v := range r.Authorization {
+		clone.Authorization[k] = v
+	}
+	copy(clone.Body, r.Body)
+	return clone
+}
+
 // SIPURI represents a parsed SIP URI.
 type SIPURI struct {
 	Scheme string // e.g., "sip"

@@ -62,6 +62,23 @@ func NewSIPServer(s *storage.Storage, realm string) *SIPServer {
 	}
 }
 
+// NewClientTx creates a new client transaction based on the request method.
+func (s *SIPServer) NewClientTx(req *SIPRequest, transport Transport) (ClientTransaction, error) {
+	var clientTx ClientTransaction
+	var err error
+	switch req.Method {
+	case "INVITE", "UPDATE":
+		clientTx, err = NewInviteClientTx(req, transport)
+	default:
+		clientTx, err = NewNonInviteClientTx(req, transport)
+	}
+	if err != nil {
+		return nil, err
+	}
+	s.txManager.Add(clientTx)
+	return clientTx, nil
+}
+
 // getDialogID generates a unique identifier for a dialog.
 // The order of tags is important for lookup.
 func getDialogID(callID, fromTag, toTag string) string {
@@ -788,7 +805,7 @@ func (s *SIPServer) proxyInitialRequest(originalReq *SIPRequest, upstreamTx Serv
 	}
 
 	// This is where the forking logic begins.
-	forkingProxy := NewForkingProxy(upstreamTx)
+	forkingProxy := NewForkingProxy(s, upstreamTx)
 	inboundProto := upstreamTx.Transport().GetProto()
 
 	for _, registration := range activeRegistrations {
