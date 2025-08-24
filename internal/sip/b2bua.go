@@ -23,14 +23,16 @@ type B2BUA struct {
 	done         chan bool
 	mu           sync.RWMutex
 	cancel       func()
+	StartTime    time.Time
 }
 
 // NewB2BUA creates and initializes a new B2BUA instance.
 func NewB2BUA(s *SIPServer, aLegTx ServerTransaction) *B2BUA {
 	return &B2BUA{
-		server: s,
-		aLegTx: aLegTx,
-		done:   make(chan bool),
+		server:    s,
+		aLegTx:    aLegTx,
+		done:      make(chan bool),
+		StartTime: time.Now(),
 	}
 }
 

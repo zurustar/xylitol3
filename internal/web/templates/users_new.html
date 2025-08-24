@@ -15,6 +15,10 @@
 </head>
 <body>
     <h1>Add New SIP User</h1>
+    <nav>
+        <a href="/users">Manage Users</a> |
+        <a href="/sessions">Active Sessions</a>
+    </nav>
     <form action="/users/new" method="post">
         <label for="username">Username:</label>
         <input type="text" id="username" name="username" required>
@@ -24,6 +28,5 @@
 
         <button type="submit">Add User</button>
     </form>
-    <a href="/users" class="back-link">Back to User List</a>
 </body>
 </html>
