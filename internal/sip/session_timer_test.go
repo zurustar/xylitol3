@@ -203,8 +203,10 @@ func TestSipProxy_SessionTimer_HandlesDownstream422(t *testing.T) {
 		assert.NoError(t, err)
 		retryInvite, _ := ParseSIPRequest(retryInviteStr)
 		assert.Equal(t, "2 INVITE", retryInvite.GetHeader("CSeq"))
-		minSE, _ := retryInvite.MinSE()
-		assert.Equal(t, 2000, minSE)
+		se, err := retryInvite.SessionExpires()
+		assert.NoError(t, err)
+		assert.NotNil(t, se)
+		assert.Equal(t, 2000, se.Delta)
 
 		// 5. Bob accepts the retry
 		res200 := BuildResponse(200, "OK", retryInvite, map[string]string{

@@ -235,13 +235,31 @@ func (r *SIPRequest) TopVia() (*Via, error) {
 
 	// A request might have multiple Via headers, represented as a comma-separated list
 	// in a single header line. The top-most one is the first one.
-	topViaValue := viaHeader
-	if idx := strings.Index(viaHeader, ","); idx != -1 {
-		// This is a naive split. A proper parser would handle quoted commas.
-		topViaValue = strings.TrimSpace(viaHeader[:idx])
+	// We use the robust splitter to correctly find the first logical Via entry.
+	viaValues := splitByCommaOutsideQuotes(viaHeader)
+	if len(viaValues) == 0 {
+		return nil, fmt.Errorf("no Via header values found after parsing")
 	}
+	topViaValue := strings.TrimSpace(viaValues[0])
 
 	return ParseVia(topViaValue)
+}
+
+// splitByCommaOutsideQuotes splits a string by commas, but ignores commas within double quotes.
+func splitByCommaOutsideQuotes(s string) []string {
+	var result []string
+	var start int
+	inQuotes := false
+	for i, r := range s {
+		if r == '"' {
+			inQuotes = !inQuotes
+		} else if r == ',' && !inQuotes {
+			result = append(result, s[start:i])
+			start = i + 1
+		}
+	}
+	result = append(result, s[start:])
+	return result
 }
 
 // AllVias parses and returns all Via headers from the request.
@@ -254,9 +272,7 @@ func (r *SIPRequest) AllVias() ([]*Via, error) {
 		return nil, nil // No via headers is not an error
 	}
 
-	// This is a naive split. A proper parser would handle quoted commas.
-	// For this proxy's purpose, it's sufficient.
-	viaValues := strings.Split(viaHeader, ",")
+	viaValues := splitByCommaOutsideQuotes(viaHeader)
 	vias := make([]*Via, 0, len(viaValues))
 
 	for _, viaValue := range viaValues {
@@ -277,11 +293,22 @@ func (r *SIPRequest) AllVias() ([]*Via, error) {
 
 // ParseSIPRequest parses a raw SIP request from a string.
 func ParseSIPRequest(raw string) (*SIPRequest, error) {
-	lines := strings.Split(raw, "\r\n")
+	// Find the double CRLF that separates headers from the body
+	endOfHeaders := strings.Index(raw, "\r\n\r\n")
+	if endOfHeaders == -1 {
+		// If there's no double CRLF, the request might just be headers
+		// without a body, or it's malformed if it's supposed to have one.
+		// For now, we'll treat the whole thing as the header part.
+		endOfHeaders = len(raw)
+	}
+
+	headerPart := raw[:endOfHeaders]
+	lines := strings.Split(headerPart, "\r\n")
 	if len(lines) < 1 {
 		return nil, fmt.Errorf("empty request")
 	}
 
+	// Parse request line
 	reqLine := strings.Split(lines[0], " ")
 	if len(reqLine) != 3 {
 		return nil, fmt.Errorf("invalid request line: %s", lines[0])
@@ -294,9 +321,10 @@ func ParseSIPRequest(raw string) (*SIPRequest, error) {
 		Headers: make(map[string]string),
 	}
 
+	// Parse headers
 	for _, line := range lines[1:] {
 		if line == "" {
-			continue // End of headers or empty line
+			continue // Should not happen with this logic, but good practice
 		}
 		parts := strings.SplitN(line, ":", 2)
 		if len(parts) != 2 {
@@ -304,7 +332,6 @@ func ParseSIPRequest(raw string) (*SIPRequest, error) {
 		}
 		key := strings.TrimSpace(parts[0])
 		value := strings.TrimSpace(parts[1])
-		// Canonicalize header names for consistent access
 		headerKey := strings.Title(key)
 		req.Headers[headerKey] = value
 
@@ -315,6 +342,21 @@ func ParseSIPRequest(raw string) (*SIPRequest, error) {
 
 	if req.Method == "" {
 		return nil, fmt.Errorf("missing method")
+	}
+
+	// Parse body, if any
+	contentLengthStr := req.GetHeader("Content-Length")
+	if contentLengthStr != "" {
+		contentLength, err := strconv.Atoi(contentLengthStr)
+		if err == nil && contentLength > 0 {
+			bodyStart := endOfHeaders + 4 // a.k.a. len("\r\n\r\n")
+			if bodyStart+contentLength <= len(raw) {
+				req.Body = []byte(raw[bodyStart : bodyStart+contentLength])
+			} else {
+				// Malformed request, Content-Length is larger than the actual body
+				return nil, fmt.Errorf("malformed request: content length %d is larger than actual body size", contentLength)
+			}
+		}
 	}
 
 	return req, nil
