@@ -174,4 +174,7 @@ func TestSipProxy_InviteCancelFlow(t *testing.T) {
 	if !got487 {
 		t.Error("Did not receive 487 Request Terminated for INVITE")
 	}
+
+	// Allow time for server-side transactions to terminate gracefully.
+	time.Sleep(100 * time.Millisecond)
 }

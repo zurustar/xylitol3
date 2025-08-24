@@ -34,6 +34,33 @@ func (r *SIPResponse) GetHeader(name string) string {
 	return r.Headers[strings.Title(name)]
 }
 
+// SessionExpires parses the Session-Expires header from the response.
+func (r *SIPResponse) SessionExpires() (*SessionExpires, error) {
+	seHeader := r.GetHeader("Session-Expires")
+	if seHeader == "" {
+		// Also check compact form 'x'
+		seHeader = r.GetHeader("x")
+	}
+	if seHeader == "" {
+		return nil, nil // Not an error, header is just not present
+	}
+	return ParseSessionExpires(seHeader)
+}
+
+// MinSE parses the Min-SE header from the response. Returns -1 if not found.
+func (r *SIPResponse) MinSE() (int, error) {
+	minSEHeader := r.GetHeader("Min-SE")
+	if minSEHeader == "" {
+		return -1, nil // Not an error, header is not present
+	}
+	// Min-SE only has a delta-seconds value
+	minSE, err := strconv.Atoi(strings.TrimSpace(minSEHeader))
+	if err != nil {
+		return -1, fmt.Errorf("could not parse Min-SE value: %w", err)
+	}
+	return minSE, nil
+}
+
 // TopVia parses and returns the top-most Via header from the response.
 func (r *SIPResponse) TopVia() (*Via, error) {
 	viaHeader := r.GetHeader("Via")
