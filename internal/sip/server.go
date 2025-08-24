@@ -780,3 +780,48 @@ func (s *SIPServer) expireSession(dialogID string) {
 		delete(s.sessions, dialogID)
 	}
 }
+
+// SessionInfo provides a snapshot of an active session for display purposes.
+type SessionInfo struct {
+	Caller   string
+	Callee   string
+	Duration time.Duration
+	CallID   string
+}
+
+// GetActiveSessions returns a slice of SessionInfo for all active dialogs.
+func (s *SIPServer) GetActiveSessions() []SessionInfo {
+	var sessions []SessionInfo
+	s.dialogs.Range(func(key, value interface{}) bool {
+		b2bua, ok := value.(*B2BUA)
+		if !ok {
+			return true // continue
+		}
+
+		b2bua.mu.RLock()
+		defer b2bua.mu.RUnlock()
+
+		if b2bua.aLegTx == nil || b2bua.aLegTx.OriginalRequest() == nil {
+			return true
+		}
+
+		// To avoid showing the same session twice (since we store by both a-leg and b-leg dialog IDs),
+		// we only act when we're iterating on the A-leg's ID.
+		// Also check that the dialog has been fully established.
+		if b2bua.aLegDialogID == "" || key.(string) != b2bua.aLegDialogID {
+			return true
+		}
+
+		origReq := b2bua.aLegTx.OriginalRequest()
+		info := SessionInfo{
+			Caller:   origReq.GetHeader("From"),
+			Callee:   origReq.GetHeader("To"),
+			Duration: time.Since(b2bua.StartTime).Round(time.Second),
+			CallID:   origReq.GetHeader("Call-ID"),
+		}
+		sessions = append(sessions, info)
+
+		return true // continue iteration
+	})
+	return sessions
+}
