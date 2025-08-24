@@ -2,6 +2,7 @@ package sip
 
 import (
 	"reflect"
+	"strconv"
 	"testing"
 )
 
@@ -88,6 +89,91 @@ func TestParseSIPRequest(t *testing.T) {
 		_, err := ParseSIPRequest(rawReq)
 		if err == nil {
 			t.Error("Expected error for empty request, but got nil")
+		}
+	})
+
+	t.Run("Request with body", func(t *testing.T) {
+		sdpBody := "v=0\r\n" +
+			"o=user1 53655765 2353687637 IN IP4 192.0.2.1\r\n" +
+			"s=-\r\n" +
+			"c=IN IP4 192.0.2.1\r\n" +
+			"t=0 0\r\n" +
+			"m=audio 8000 RTP/AVP 0\r\n" +
+			"a=rtpmap:0 PCMU/8000\r\n"
+		rawReq := "INVITE sip:bob@biloxi.com SIP/2.0\r\n" +
+			"Via: SIP/2.0/UDP client.atlanta.com;branch=z9hG4bK74bf9\r\n" +
+			"From: Alice <sip:alice@atlanta.com>;tag=1928301774\r\n" +
+			"To: Bob <sip:bob@biloxi.com>\r\n" +
+			"Call-ID: a84b4c76e66710\r\n" +
+			"CSeq: 314159 INVITE\r\n" +
+			"Content-Type: application/sdp\r\n" +
+			"Content-Length: " + strconv.Itoa(len(sdpBody)) + "\r\n" +
+			"\r\n" +
+			sdpBody
+
+		req, err := ParseSIPRequest(rawReq)
+		if err != nil {
+			t.Fatalf("ParseSIPRequest failed: %v", err)
+		}
+
+		if len(req.Body) == 0 {
+			t.Fatal("Request body is empty, but it should be populated.")
+		}
+
+		if string(req.Body) != sdpBody {
+			t.Errorf("Request body does not match expected SDP.\nExpected:\n%s\nGot:\n%s", sdpBody, string(req.Body))
+		}
+	})
+}
+
+func TestParseViaHeader(t *testing.T) {
+	t.Run("Single Via header", func(t *testing.T) {
+		req := &SIPRequest{Headers: map[string]string{"Via": "SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds"}}
+		vias, err := req.AllVias()
+		if err != nil {
+			t.Fatalf("AllVias() failed: %v", err)
+		}
+		if len(vias) != 1 {
+			t.Fatalf("Expected 1 Via header, got %d", len(vias))
+		}
+		if vias[0].Host != "pc33.atlanta.com" {
+			t.Errorf("Expected host pc33.atlanta.com, got %s", vias[0].Host)
+		}
+		if vias[0].Branch() != "z9hG4bK776asdhds" {
+			t.Errorf("Expected branch z9hG4bK776asdhds, got %s", vias[0].Branch())
+		}
+	})
+
+	t.Run("Multiple Via headers with quoted comma", func(t *testing.T) {
+		// This tests the naive comma splitting. A proper parser should handle quoted commas.
+		viaHeader := `SIP/2.0/UDP first.example.com;branch=z9hG4bK-abc, SIP/2.0/UDP second.example.com;branch=z9hG4bK-def;someparam="a,b,c"`
+		req := &SIPRequest{Headers: map[string]string{"Via": viaHeader}}
+		vias, err := req.AllVias()
+		if err != nil {
+			t.Fatalf("AllVias() failed: %v", err)
+		}
+		if len(vias) != 2 {
+			t.Fatalf("Expected 2 Via headers, got %d", len(vias))
+		}
+
+		// Check first Via
+		if vias[0].Host != "first.example.com" {
+			t.Errorf("Expected host first.example.com, got %s", vias[0].Host)
+		}
+		if vias[0].Branch() != "z9hG4bK-abc" {
+			t.Errorf("Expected branch z9hG4bK-abc, got %s", vias[0].Branch())
+		}
+
+		// Check second Via
+		if vias[1].Host != "second.example.com" {
+			t.Errorf("Expected host second.example.com, got %s", vias[1].Host)
+		}
+		if vias[1].Branch() != "z9hG4bK-def" {
+			t.Errorf("Expected branch z9hG4bK-def, got %s", vias[1].Branch())
+		}
+		expectedParam := `"a,b,c"`
+		if param, ok := vias[1].GetParam("someparam"); !ok || param != expectedParam {
+			t.Errorf("Expected param 'someparam' to be %q, got %q", expectedParam, param)
 		}
 	})
 }
