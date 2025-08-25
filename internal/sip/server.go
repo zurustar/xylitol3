@@ -801,18 +801,18 @@ func (s *SIPServer) GetActiveSessions() []SessionInfo {
 		b2bua.mu.RLock()
 		defer b2bua.mu.RUnlock()
 
-		if b2bua.aLegTx == nil || b2bua.aLegTx.OriginalRequest() == nil {
+		if b2bua.virtualUASTx == nil || b2bua.virtualUASTx.OriginalRequest() == nil {
 			return true
 		}
 
-		// 同じセッションを2回表示しないようにするため（a-legとb-legの両方のダイアログIDで保存しているため）、
-		// A-legのIDで反復処理している場合にのみアクションを実行します。
+		// 同じセッションを2回表示しないようにするため（Virtual-UAS-legとVirtual-UAC-legの両方のダイアログIDで保存しているため）、
+		// Virtual-UAS-legのIDで反復処理している場合にのみアクションを実行します。
 		// また、ダイアログが完全に確立されていることも確認します。
-		if b2bua.aLegDialogID == "" || key.(string) != b2bua.aLegDialogID {
+		if b2bua.virtualUASDialogID == "" || key.(string) != b2bua.virtualUASDialogID {
 			return true
 		}
 
-		origReq := b2bua.aLegTx.OriginalRequest()
+		origReq := b2bua.virtualUASTx.OriginalRequest()
 		info := SessionInfo{
 			Caller:   origReq.GetHeader("From"),
 			Callee:   origReq.GetHeader("To"),
