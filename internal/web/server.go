@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sip-server/internal/sip"
 	"sip-server/internal/storage"
+	"strings"
 	"time"
 )
 
@@ -94,8 +95,8 @@ func (s *Server) handleGuidanceSettingsForm(w http.ResponseWriter, r *http.Reque
 	}
 
 	// フォームに現在の値を事前入力します
-	user, audio := s.sipServer.GetGuidanceSettings()
-	data["GuidanceUser"] = user
+	users, audio := s.sipServer.GetGuidanceSettings()
+	data["GuidanceUser"] = strings.Join(users, ", ")
 	data["GuidanceAudio"] = audio
 
 	tmpl := s.templates["guidance.html"]
@@ -112,19 +113,34 @@ func (s *Server) handleGuidanceSettingsSubmit(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	guidanceUser := r.FormValue("guidance_user")
+	guidanceUserStr := r.FormValue("guidance_user")
 	guidanceAudio := r.FormValue("guidance_audio")
 
-	if guidanceUser == "" || guidanceAudio == "" {
+	// カンマで分割し、空白をトリムして、空のエントリを削除します
+	var guidanceUsers []string
+	if guidanceUserStr != "" {
+		users := strings.Split(guidanceUserStr, ",")
+		for _, u := range users {
+			trimmed := strings.TrimSpace(u)
+			if trimmed != "" {
+				guidanceUsers = append(guidanceUsers, trimmed)
+			}
+		}
+	}
+
+	if len(guidanceUsers) == 0 || guidanceAudio == "" {
 		data := map[string]interface{}{
-			"Error": "SIPユーザーと音声ファイルパスの両方が必要です。",
+			"Error": "少なくとも1つのSIPユーザーと音声ファイルパスが必要です。",
 		}
 		s.handleGuidanceSettingsForm(w, r, data)
 		return
 	}
 
+	// DBに保存するために、クリーンアップされたスライスをカンマ区切りの文字列に戻します
+	dbUserStr := strings.Join(guidanceUsers, ",")
+
 	// 設定をDBに保存します
-	if err := s.storage.SetSetting("guidance_user", guidanceUser); err != nil {
+	if err := s.storage.SetSetting("guidance_user", dbUserStr); err != nil {
 		log.Printf("Error saving guidance_user setting: %v", err)
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
@@ -136,7 +152,7 @@ func (s *Server) handleGuidanceSettingsSubmit(w http.ResponseWriter, r *http.Req
 	}
 
 	// 実行中のSIPサーバーインスタンスを更新します
-	s.sipServer.UpdateGuidanceSettings(guidanceUser, guidanceAudio)
+	s.sipServer.UpdateGuidanceSettings(guidanceUsers, guidanceAudio)
 
 	// 成功メッセージとともにフォームを再表示します
 	data := map[string]interface{}{

@@ -29,7 +29,8 @@
     <form method="post">
         <p>
             <label for="guidance_user">ガイダンスSIPユーザー:</label><br>
-            <input type="text" id="guidance_user" name="guidance_user" value="{{.GuidanceUser}}" required>
+            <textarea id="guidance_user" name="guidance_user" rows="4" cols="50" required>{{.GuidanceUser}}</textarea>
+            <br><small>複数のユーザーをカンマ区切りで入力します (例: user1, user2, user3)</small>
         </p>
         <p>
             <label for="guidance_audio">ガイダンス音声ファイルパス:</label><br>
