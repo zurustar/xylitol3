@@ -67,7 +67,7 @@ func TestSipProxy_SessionTimer_RejectsLowSE(t *testing.T) {
 	s, _ := storage.NewStorage(":memory:")
 	defer s.Close()
 	realm := "go-sip.test"
-	server := NewSIPServer(s, realm)
+	server := NewSIPServer(s, realm, "")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -144,7 +144,7 @@ func TestSipProxy_SessionTimer_HandlesDownstream422(t *testing.T) {
 	s, _ := storage.NewStorage(":memory:")
 	defer s.Close()
 	realm := "go-sip.test"
-	server := NewSIPServer(s, realm)
+	server := NewSIPServer(s, realm, "")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	serverConn, err := net.ListenPacket("udp", "127.0.0.1:0")
@@ -252,7 +252,7 @@ func TestSipProxy_SessionTimer_UASDoesNotSupport(t *testing.T) {
 	s, _ := storage.NewStorage(":memory:")
 	defer s.Close()
 	realm := "go-sip.test"
-	server := NewSIPServer(s, realm)
+	server := NewSIPServer(s, realm, "")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	serverConn, err := net.ListenPacket("udp", "127.0.0.1:0")
