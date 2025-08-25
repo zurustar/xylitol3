@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// InviteServerTxState defines the states for an INVITE server transaction.
+// InviteServerTxState は、INVITEサーバートランザクションの状態を定義します。
 type InviteServerTxState int
 
 const (
@@ -17,7 +17,7 @@ const (
 	InviteServerTxStateTerminated
 )
 
-// InviteServerTx implements the server-side INVITE transaction state machine.
+// InviteServerTx は、サーバー側のINVITEトランザクションステートマシンを実装します。
 type InviteServerTx struct {
 	id           string
 	originalReq  *SIPRequest
@@ -33,7 +33,7 @@ type InviteServerTx struct {
 	transport    Transport
 }
 
-// NewInviteServerTx creates and starts a new INVITE server transaction.
+// NewInviteServerTx は、新しいINVITEサーバートランザクションを作成して開始します。
 func NewInviteServerTx(req *SIPRequest, transport Transport) (ServerTransaction, error) {
 	topVia, err := req.TopVia()
 	if err != nil {
@@ -95,9 +95,9 @@ func (tx *InviteServerTx) Receive(req *SIPRequest) {
 			if tx.timerH != nil {
 				tx.timerH.Stop()
 			}
-			// For reliable transports, terminate immediately. For unreliable, start Timer I.
+			// 信頼性の高いトランスポートの場合はすぐに終了します。信頼性の低い場合はタイマーIを開始します。
 			if isReliable(tx.transport.GetProto()) {
-				tx.mu.Unlock() // Unlock before calling Terminate which locks again
+				tx.mu.Unlock() // Terminateを呼び出す前にロックを解除します。Terminateは再度ロックします。
 				tx.Terminate()
 				return
 			}
@@ -141,8 +141,8 @@ func (tx *InviteServerTx) run() {
 			switch {
 			case res.StatusCode >= 101 && res.StatusCode < 200:
 			case res.StatusCode >= 200 && res.StatusCode < 300:
-				// Per RFC 3261 Section 17.2.1, the transaction terminates immediately after
-				// passing a 2xx response to the transport. The TU is responsible for retransmissions.
+				// RFC 3261セクション17.2.1によると、トランザクションは2xx応答をトランスポートに渡した直後に終了します。
+				// TUが再送信を担当します。
 				tx.mu.Unlock()
 				tx.Terminate()
 				return
@@ -163,7 +163,7 @@ func (tx *InviteServerTx) run() {
 
 func (tx *InviteServerTx) startTimerG() {
 	if isReliable(tx.transport.GetProto()) {
-		return // Do not retransmit responses over reliable transport
+		return // 信頼性の高いトランスポートで応答を再送信しないでください
 	}
 	interval := T1
 	tx.timerG = time.AfterFunc(interval, func() {

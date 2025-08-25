@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-// SIPResponse represents a SIP response message.
+// SIPResponse は、SIPレスポンスメッセージを表します。
 type SIPResponse struct {
 	Proto      string
 	StatusCode int
@@ -15,12 +15,12 @@ type SIPResponse struct {
 	Body       []byte
 }
 
-// String returns the string representation of the SIP response.
+// String は、SIPレスポンスの文字列表現を返します。
 func (r *SIPResponse) String() string {
 	var builder strings.Builder
 	builder.WriteString(fmt.Sprintf("%s %d %s\r\n", r.Proto, r.StatusCode, r.Reason))
 	for key, value := range r.Headers {
-		// Ignore Content-Length from the map, we'll add it based on the Body.
+		// マップからContent-Lengthを無視し、Bodyに基づいて追加します。
 		if strings.Title(key) != "Content-Length" {
 			builder.WriteString(fmt.Sprintf("%s: %s\r\n", strings.Title(key), value))
 		}
@@ -31,31 +31,31 @@ func (r *SIPResponse) String() string {
 	return builder.String()
 }
 
-// GetHeader returns the value of a header. It expects the name to be in canonical form.
+// GetHeader は、ヘッダーの値を返します。名前は正規の形式であることを期待します。
 func (r *SIPResponse) GetHeader(name string) string {
 	return r.Headers[strings.Title(name)]
 }
 
-// SessionExpires parses the Session-Expires header from the response.
+// SessionExpires は、レスポンスからSession-Expiresヘッダーを解析します。
 func (r *SIPResponse) SessionExpires() (*SessionExpires, error) {
 	seHeader := r.GetHeader("Session-Expires")
 	if seHeader == "" {
-		// Also check compact form 'x'
+		// コンパクト形式 'x' もチェックします
 		seHeader = r.GetHeader("x")
 	}
 	if seHeader == "" {
-		return nil, nil // Not an error, header is just not present
+		return nil, nil // エラーではなく、ヘッダーが存在しないだけです
 	}
 	return ParseSessionExpires(seHeader)
 }
 
-// MinSE parses the Min-SE header from the response. Returns -1 if not found.
+// MinSE は、レスポンスからMin-SEヘッダーを解析します。見つからない場合は-1を返します。
 func (r *SIPResponse) MinSE() (int, error) {
 	minSEHeader := r.GetHeader("Min-SE")
 	if minSEHeader == "" {
-		return -1, nil // Not an error, header is not present
+		return -1, nil // エラーではなく、ヘッダーが存在しないだけです
 	}
-	// Min-SE only has a delta-seconds value
+	// Min-SEにはdelta-seconds値しかありません
 	minSE, err := strconv.Atoi(strings.TrimSpace(minSEHeader))
 	if err != nil {
 		return -1, fmt.Errorf("could not parse Min-SE value: %w", err)
@@ -63,7 +63,7 @@ func (r *SIPResponse) MinSE() (int, error) {
 	return minSE, nil
 }
 
-// TopVia parses and returns the top-most Via header from the response.
+// TopVia は、レスポンスから最上位のViaヘッダーを解析して返します。
 func (r *SIPResponse) TopVia() (*Via, error) {
 	viaHeader := r.GetHeader("Via")
 	if viaHeader == "" {
@@ -78,7 +78,7 @@ func (r *SIPResponse) TopVia() (*Via, error) {
 	return ParseVia(topViaValue)
 }
 
-// PopVia removes the top-most Via header from the response.
+// PopVia は、レスポンスから最上位のViaヘッダーを削除します。
 func (r *SIPResponse) PopVia() {
 	viaHeader := r.GetHeader("Via")
 	if viaHeader == "" {
@@ -86,16 +86,16 @@ func (r *SIPResponse) PopVia() {
 	}
 
 	if idx := strings.Index(viaHeader, ","); idx != -1 {
-		// There are more Via headers, so we set the header to the rest of the list.
+		// さらにViaヘッダーがあるため、ヘッダーをリストの残りの部分に設定します。
 		r.Headers["Via"] = strings.TrimSpace(viaHeader[idx+1:])
 	} else {
-		// This was the only Via header, so we remove the header entirely.
+		// これが唯一のViaヘッダーだったので、ヘッダーを完全に削除します。
 		delete(r.Headers, "Via")
 	}
 }
 
-// BuildResponse constructs a SIP response object.
-// It copies necessary headers from the original request and allows adding new ones.
+// BuildResponse は、SIPレスポンスオブジェクトを構築します。
+// 元のリクエストから必要なヘッダーをコピーし、新しいヘッダーの追加を許可します。
 func BuildResponse(statusCode int, statusText string, req *SIPRequest, extraHeaders map[string]string) *SIPResponse {
 	resp := &SIPResponse{
 		Proto:      req.Proto,
@@ -105,23 +105,23 @@ func BuildResponse(statusCode int, statusText string, req *SIPRequest, extraHead
 		Body:       []byte{},
 	}
 
-	// Copy essential headers from the request.
-	// Use canonical header key forms.
+	// 元のリクエストから必須ヘッダーをコピーします。
+	// 正規のヘッダーキー形式を使用します。
 	headersToCopy := []string{"Via", "From", "To", "Call-ID", "CSeq"}
 	for _, h := range headersToCopy {
 		if val := req.GetHeader(h); val != "" {
-			// Add a tag to the 'To' header in the response, as required by RFC 3261,
-			// if the request's 'To' header didn't already have one.
+			// RFC 3261で要求されているように、リクエストの'To'ヘッダーにまだタグがない場合、
+			// レスポンスの'To'ヘッダーにタグを追加します。
 			if h == "To" && !strings.Contains(req.GetHeader("To"), "tag=") {
-				// This is a simple, static tag for demonstration. A real server
-				// would generate a unique tag for the dialog.
+				// これはデモンストレーション用の単純な静的タグです。実際のサーバーは
+				// ダイアログ用に一意のタグを生成します。
 				val = fmt.Sprintf("%s;tag=z9hG4bK-response-tag", val)
 			}
 			resp.Headers[strings.Title(h)] = val
 		}
 	}
 
-	// Add any extra headers provided by the caller (e.g., WWW-Authenticate, Contact, Allow).
+	// 呼び出し元から提供された追加のヘッダー（例：WWW-Authenticate、Contact、Allow）を追加します。
 	for key, val := range extraHeaders {
 		resp.Headers[strings.Title(key)] = val
 	}
@@ -129,20 +129,20 @@ func BuildResponse(statusCode int, statusText string, req *SIPRequest, extraHead
 	return resp
 }
 
-// BuildAck creates an ACK request for a given final response to an INVITE.
-// Per RFC 3261, the ACK for a 2xx response is a separate transaction, but for
-// a non-2xx response, it's part of the same transaction.
+// BuildAck は、INVITEへの特定の最終レスポンスに対するACKリクエストを作成します。
+// RFC 3261によると、2xxレスポンスに対するACKは別のトランザクションですが、
+// 2xx以外のレスポンスの場合は同じトランザクションの一部です。
 func BuildAck(res *SIPResponse, originalReq *SIPRequest) *SIPRequest {
 	ack := &SIPRequest{
 		Method: "ACK",
 		URI:    originalReq.URI,
 		Proto:  originalReq.Proto,
 		Headers: map[string]string{
-			// The Via header field in the ACK MUST be the same as the top Via
-			// header field of the original request.
-			"Via":          originalReq.GetHeader("Via"),
-			// The To header field in the ACK MUST equal the To header field in the
-			// response being acknowledged.
+			// ACKのViaヘッダーフィールドは、元のリクエストの最上位のVia
+			// ヘッダーフィールドと同じでなければなりません（MUST）。
+			"Via": originalReq.GetHeader("Via"),
+			// ACKのToヘッダーフィールドは、確認応答されるレスポンスのToヘッダーフィールドと
+			// 等しくなければなりません（MUST）。
 			"To":           res.Headers["To"],
 			"From":         originalReq.GetHeader("From"),
 			"Call-ID":      originalReq.GetHeader("Call-ID"),
@@ -152,7 +152,7 @@ func BuildAck(res *SIPResponse, originalReq *SIPRequest) *SIPRequest {
 		Body: []byte{},
 	}
 
-	// Copy Route headers if they were in the original INVITE
+	// 元のINVITEにRouteヘッダーがあった場合はコピーします
 	if route := originalReq.GetHeader("Route"); route != "" {
 		ack.Headers["Route"] = route
 	}
@@ -160,7 +160,7 @@ func BuildAck(res *SIPResponse, originalReq *SIPRequest) *SIPRequest {
 	return ack
 }
 
-// ParseSIPResponse parses a raw string into a SIPResponse struct.
+// ParseSIPResponse は、生の文字列をSIPResponse構造体に解析します。
 func ParseSIPResponse(raw string) (*SIPResponse, error) {
 	lines := strings.Split(raw, "\r\n")
 	if len(lines) < 1 {
@@ -168,7 +168,7 @@ func ParseSIPResponse(raw string) (*SIPResponse, error) {
 	}
 
 	respLine := strings.SplitN(lines[0], " ", 3)
-	if len(respLine) < 2 { // Reason phrase can be empty
+	if len(respLine) < 2 { // Reasonフレーズは空にすることができます
 		return nil, fmt.Errorf("invalid response line: %s", lines[0])
 	}
 
@@ -189,7 +189,7 @@ func ParseSIPResponse(raw string) (*SIPResponse, error) {
 		Headers:    make(map[string]string),
 	}
 
-	// Find the end of headers (blank line)
+	// ヘッダーの終わり（空行）を見つけます
 	headerEndIndex := len(lines)
 	bodyIndex := -1
 	for i, line := range lines[1:] {
@@ -200,18 +200,18 @@ func ParseSIPResponse(raw string) (*SIPResponse, error) {
 		}
 	}
 
-	// Parse headers
+	// ヘッダーを解析
 	for _, line := range lines[1:headerEndIndex] {
 		parts := strings.SplitN(line, ":", 2)
 		if len(parts) != 2 {
-			continue // Malformed header
+			continue // 不正な形式のヘッダー
 		}
 		key := strings.TrimSpace(parts[0])
 		value := strings.TrimSpace(parts[1])
 		res.Headers[strings.Title(key)] = value
 	}
 
-	// Get body if Content-Length indicates it
+	// Content-Lengthが示している場合はボディを取得します
 	if contentLengthStr := res.GetHeader("Content-Length"); contentLengthStr != "" {
 		if contentLength, err := strconv.Atoi(contentLengthStr); err == nil && contentLength > 0 {
 			if bodyIndex != -1 && len(raw) >= bodyIndex+4 {

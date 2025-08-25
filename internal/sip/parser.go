@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-// SIPRequest represents a parsed SIP request.
+// SIPRequest は、解析されたSIPリクエストを表します。
 type SIPRequest struct {
 	Method        string
 	URI           string
@@ -16,12 +16,12 @@ type SIPRequest struct {
 	Body          []byte
 }
 
-// String returns the string representation of the SIP request.
+// String は、SIPリクエストの文字列表現を返します。
 func (r *SIPRequest) String() string {
 	var builder strings.Builder
 	builder.WriteString(fmt.Sprintf("%s %s %s\r\n", r.Method, r.URI, r.Proto))
 	for key, value := range r.Headers {
-		// Ignore Content-Length from the map, we'll add it based on the Body.
+		// マップからContent-Lengthを無視し、Bodyに基づいて追加します。
 		if strings.Title(key) != "Content-Length" {
 			builder.WriteString(fmt.Sprintf("%s: %s\r\n", strings.Title(key), value))
 		}
@@ -32,7 +32,7 @@ func (r *SIPRequest) String() string {
 	return builder.String()
 }
 
-// Clone creates a deep copy of the SIPRequest.
+// Clone は、SIPRequestのディープコピーを作成します。
 func (r *SIPRequest) Clone() *SIPRequest {
 	if r == nil {
 		return nil
@@ -55,16 +55,16 @@ func (r *SIPRequest) Clone() *SIPRequest {
 	return clone
 }
 
-// SIPURI represents a parsed SIP URI.
+// SIPURI は、解析されたSIP URIを表します。
 type SIPURI struct {
-	Scheme string // e.g., "sip"
+	Scheme string // 例: "sip"
 	User   string
 	Host   string
 	Port   string
 	Params map[string]string
 }
 
-// String reassembles the URI into a string.
+// String は、URIを文字列に再構築します。
 func (u *SIPURI) String() string {
 	var b strings.Builder
 	b.WriteString(u.Scheme)
@@ -78,7 +78,7 @@ func (u *SIPURI) String() string {
 		b.WriteString(":")
 		b.WriteString(u.Port)
 	}
-	// Note: This does not preserve the original order of parameters.
+	// 注: これはパラメータの元の順序を保持しません。
 	for k, v := range u.Params {
 		b.WriteString(";")
 		b.WriteString(k)
@@ -90,10 +90,10 @@ func (u *SIPURI) String() string {
 	return b.String()
 }
 
-// ParseSIPURI parses a SIP URI string into a SIPURI struct.
-// It handles URIs in the format: <sip:user@host:port;params> or sip:user@host
+// ParseSIPURI は、SIP URI文字列をSIPURI構造体に解析します。
+// <sip:user@host:port;params> または sip:user@host の形式のURIを処理します。
 func ParseSIPURI(uri string) (*SIPURI, error) {
-	uri = strings.Trim(uri, "<>") // Remove angle brackets
+	uri = strings.Trim(uri, "<>") // 山括弧を削除
 
 	schemeParts := strings.SplitN(uri, ":", 2)
 	if len(schemeParts) != 2 {
@@ -106,11 +106,11 @@ func ParseSIPURI(uri string) (*SIPURI, error) {
 	}
 	remaining := schemeParts[1]
 
-	// Separate params from the main part
+	// メイン部分からパラメータを分離
 	mainAndParams := strings.Split(remaining, ";")
 	mainPart := mainAndParams[0]
 
-	// Parse params
+	// パラメータを解析
 	if len(mainAndParams) > 1 {
 		for _, param := range mainAndParams[1:] {
 			kv := strings.SplitN(param, "=", 2)
@@ -123,7 +123,7 @@ func ParseSIPURI(uri string) (*SIPURI, error) {
 		}
 	}
 
-	// Parse user@host:port from the main part
+	// メイン部分から user@host:port を解析
 	userHostPort := strings.SplitN(mainPart, "@", 2)
 	var hostPortPart string
 	if len(userHostPort) == 2 {
@@ -146,19 +146,19 @@ func ParseSIPURI(uri string) (*SIPURI, error) {
 	return s, nil
 }
 
-// GetHeader returns the value of a header, case-insensitively.
+// GetHeader は、大文字と小文字を区別せずにヘッダーの値を返します。
 func (r *SIPRequest) GetHeader(name string) string {
 	return r.Headers[strings.Title(name)]
 }
 
-// GetSIPURIHeader parses a header that is expected to contain a SIP URI.
+// GetSIPURIHeader は、SIP URIを含むと予想されるヘッダーを解析します。
 func (r *SIPRequest) GetSIPURIHeader(name string) (*SIPURI, error) {
 	headerValue := r.GetHeader(name)
 	if headerValue == "" {
 		return nil, fmt.Errorf("header '%s' not found", name)
 	}
-	// The value might be just the URI, or it might have a display name like "Bob" <sip:bob@host>
-	// We'll look for the angle brackets first.
+	// 値はURIだけの場合もあれば、「Bob」<sip:bob@host>のような表示名を持つ場合もあります。
+	// 最初に山括弧を探します。
 	start := strings.Index(headerValue, "<")
 	end := strings.Index(headerValue, ">")
 	if start != -1 && end != -1 && end > start {
@@ -168,34 +168,34 @@ func (r *SIPRequest) GetSIPURIHeader(name string) (*SIPURI, error) {
 	return ParseSIPURI(headerValue)
 }
 
-// Via represents a single Via header value.
+// Via は、単一のViaヘッダー値を表します。
 type Via struct {
-	Proto  string // e.g., "SIP/2.0/UDP"
+	Proto  string // 例: "SIP/2.0/UDP"
 	Host   string
 	Port   string
 	Params map[string]string
 }
 
-// GetParam returns a parameter from the Via header, case-insensitively.
+// GetParam は、大文字と小文字を区別せずにViaヘッダーからパラメータを返します。
 func (v *Via) GetParam(name string) (string, bool) {
 	val, ok := v.Params[strings.ToLower(name)]
 	return val, ok
 }
 
-// Branch returns the branch parameter from the Via header.
+// Branch は、Viaヘッダーからbranchパラメータを返します。
 func (v *Via) Branch() string {
 	val, _ := v.GetParam("branch")
 	return val
 }
 
-// ParseVia parses a single Via header field value string.
+// ParseVia は、単一のViaヘッダーフィールド値文字列を解析します。
 func ParseVia(viaValue string) (*Via, error) {
 	parts := strings.Split(viaValue, ";")
 	if len(parts) == 0 {
 		return nil, fmt.Errorf("empty via value")
 	}
 
-	// First part is proto and sent-by
+	// 最初の部分はプロトコルと送信元
 	sentByParts := strings.Fields(parts[0])
 	if len(sentByParts) != 2 {
 		return nil, fmt.Errorf("malformed sent-by in Via: %s", parts[0])
@@ -212,7 +212,7 @@ func ParseVia(viaValue string) (*Via, error) {
 		via.Port = hostPort[1]
 	}
 
-	// Subsequent parts are params
+	// 後続の部分はパラメータ
 	for _, param := range parts[1:] {
 		kv := strings.SplitN(param, "=", 2)
 		key := strings.TrimSpace(kv[0])
@@ -226,16 +226,16 @@ func ParseVia(viaValue string) (*Via, error) {
 	return via, nil
 }
 
-// TopVia parses and returns the top-most Via header.
+// TopVia は、最上位のViaヘッダーを解析して返します。
 func (r *SIPRequest) TopVia() (*Via, error) {
 	viaHeader := r.GetHeader("Via")
 	if viaHeader == "" {
 		return nil, fmt.Errorf("no Via header found")
 	}
 
-	// A request might have multiple Via headers, represented as a comma-separated list
-	// in a single header line. The top-most one is the first one.
-	// We use the robust splitter to correctly find the first logical Via entry.
+	// リクエストには複数のViaヘッダーが含まれる場合があり、単一のヘッダー行にカンマ区切りのリストとして表されます。
+	// 最上位のものは最初のものです。
+	// 堅牢なスプリッターを使用して、最初の論理的なViaエントリを正しく見つけます。
 	viaValues := splitByCommaOutsideQuotes(viaHeader)
 	if len(viaValues) == 0 {
 		return nil, fmt.Errorf("no Via header values found after parsing")
@@ -245,7 +245,7 @@ func (r *SIPRequest) TopVia() (*Via, error) {
 	return ParseVia(topViaValue)
 }
 
-// splitByCommaOutsideQuotes splits a string by commas, but ignores commas within double quotes.
+// splitByCommaOutsideQuotes は、文字列をカンマで分割しますが、二重引用符内のカンマは無視します。
 func splitByCommaOutsideQuotes(s string) []string {
 	var result []string
 	var start int
@@ -262,14 +262,13 @@ func splitByCommaOutsideQuotes(s string) []string {
 	return result
 }
 
-// AllVias parses and returns all Via headers from the request.
-// A request can have multiple Via headers, either on separate lines (which
-// get concatenated into a comma-separated list by the message parser) or
-// as a comma-separated list in a single header line.
+// AllVias は、リクエストからすべてのViaヘッダーを解析して返します。
+// リクエストには、別々の行にある複数のViaヘッダー（メッセージパーサーによってカンマ区切りのリストに連結される）か、
+// 単一のヘッダー行にカンマ区切りのリストとして含まれる場合があります。
 func (r *SIPRequest) AllVias() ([]*Via, error) {
 	viaHeader := r.GetHeader("Via")
 	if viaHeader == "" {
-		return nil, nil // No via headers is not an error
+		return nil, nil // viaヘッダーがないことはエラーではありません
 	}
 
 	viaValues := splitByCommaOutsideQuotes(viaHeader)
@@ -282,7 +281,7 @@ func (r *SIPRequest) AllVias() ([]*Via, error) {
 		}
 		via, err := ParseVia(viaValue)
 		if err != nil {
-			// Return a partial list and the error
+			// 部分的なリストとエラーを返す
 			return vias, fmt.Errorf("failed to parse via entry '%s': %w", viaValue, err)
 		}
 		vias = append(vias, via)
@@ -291,14 +290,14 @@ func (r *SIPRequest) AllVias() ([]*Via, error) {
 	return vias, nil
 }
 
-// ParseSIPRequest parses a raw SIP request from a string.
+// ParseSIPRequest は、生のSIPリクエストを文字列から解析します。
 func ParseSIPRequest(raw string) (*SIPRequest, error) {
-	// Find the double CRLF that separates headers from the body
+	// ヘッダーとボディを区切る二重CRLFを見つけます
 	endOfHeaders := strings.Index(raw, "\r\n\r\n")
 	if endOfHeaders == -1 {
-		// If there's no double CRLF, the request might just be headers
-		// without a body, or it's malformed if it's supposed to have one.
-		// For now, we'll treat the whole thing as the header part.
+		// 二重CRLFがない場合、リクエストはボディのないヘッダーだけであるか、
+		// ボディを持つはずなのに不正な形式である可能性があります。
+		// ここでは、全体をヘッダー部分として扱います。
 		endOfHeaders = len(raw)
 	}
 
@@ -308,7 +307,7 @@ func ParseSIPRequest(raw string) (*SIPRequest, error) {
 		return nil, fmt.Errorf("empty request")
 	}
 
-	// Parse request line
+	// リクエスト行を解析
 	reqLine := strings.Split(lines[0], " ")
 	if len(reqLine) != 3 {
 		return nil, fmt.Errorf("invalid request line: %s", lines[0])
@@ -321,14 +320,14 @@ func ParseSIPRequest(raw string) (*SIPRequest, error) {
 		Headers: make(map[string]string),
 	}
 
-	// Parse headers
+	// ヘッダーを解析
 	for _, line := range lines[1:] {
 		if line == "" {
-			continue // Should not happen with this logic, but good practice
+			continue // このロジックでは起こらないはずですが、良い習慣です
 		}
 		parts := strings.SplitN(line, ":", 2)
 		if len(parts) != 2 {
-			continue // Malformed header
+			continue // 不正な形式のヘッダー
 		}
 		key := strings.TrimSpace(parts[0])
 		value := strings.TrimSpace(parts[1])
@@ -344,7 +343,7 @@ func ParseSIPRequest(raw string) (*SIPRequest, error) {
 		return nil, fmt.Errorf("missing method")
 	}
 
-	// Parse body, if any
+	// ボディがあれば解析
 	contentLengthStr := req.GetHeader("Content-Length")
 	if contentLengthStr != "" {
 		contentLength, err := strconv.Atoi(contentLengthStr)
@@ -353,7 +352,7 @@ func ParseSIPRequest(raw string) (*SIPRequest, error) {
 			if bodyStart+contentLength <= len(raw) {
 				req.Body = []byte(raw[bodyStart : bodyStart+contentLength])
 			} else {
-				// Malformed request, Content-Length is larger than the actual body
+				// 不正なリクエスト、Content-Lengthが実際のボディサイズより大きい
 				return nil, fmt.Errorf("malformed request: content length %d is larger than actual body size", contentLength)
 			}
 		}
@@ -362,7 +361,7 @@ func ParseSIPRequest(raw string) (*SIPRequest, error) {
 	return req, nil
 }
 
-// parseAuthHeader parses the Digest Authorization header value.
+// parseAuthHeader は、Digest Authorizationヘッダーの値を解析します。
 func parseAuthHeader(headerValue string) map[string]string {
 	result := make(map[string]string)
 	if !strings.HasPrefix(headerValue, "Digest ") {
@@ -382,13 +381,13 @@ func parseAuthHeader(headerValue string) map[string]string {
 	return result
 }
 
-// SessionExpires represents the parsed value of a Session-Expires header.
+// SessionExpires は、Session-Expiresヘッダーの解析された値を表します。
 type SessionExpires struct {
 	Delta     int
-	Refresher string // "uac" or "uas"
+	Refresher string // "uac" または "uas"
 }
 
-// ParseSessionExpires parses the value of a Session-Expires header.
+// ParseSessionExpires は、Session-Expiresヘッダーの値を解析します。
 func ParseSessionExpires(headerValue string) (*SessionExpires, error) {
 	se := &SessionExpires{}
 	parts := strings.Split(headerValue, ";")
@@ -412,26 +411,26 @@ func ParseSessionExpires(headerValue string) (*SessionExpires, error) {
 	return se, nil
 }
 
-// SessionExpires parses the Session-Expires header from the request.
+// SessionExpires は、リクエストからSession-Expiresヘッダーを解析します。
 func (r *SIPRequest) SessionExpires() (*SessionExpires, error) {
 	seHeader := r.GetHeader("Session-Expires")
 	if seHeader == "" {
-		// Also check compact form 'x'
+		// コンパクト形式 'x' もチェックします
 		seHeader = r.GetHeader("x")
 	}
 	if seHeader == "" {
-		return nil, nil // Not an error, header is just not present
+		return nil, nil // エラーではなく、ヘッダーが存在しないだけです
 	}
 	return ParseSessionExpires(seHeader)
 }
 
-// MinSE parses the Min-SE header from the request. Returns -1 if not found.
+// MinSE は、リクエストからMin-SEヘッダーを解析します。見つからない場合は-1を返します。
 func (r *SIPRequest) MinSE() (int, error) {
 	minSEHeader := r.GetHeader("Min-SE")
 	if minSEHeader == "" {
-		return -1, nil // Not an error, header is not present
+		return -1, nil // エラーではなく、ヘッダーが存在しないだけです
 	}
-	// Min-SE only has a delta-seconds value
+	// Min-SEにはdelta-seconds値しかありません
 	minSE, err := strconv.Atoi(strings.TrimSpace(minSEHeader))
 	if err != nil {
 		return -1, fmt.Errorf("could not parse Min-SE value: %w", err)
@@ -439,9 +438,9 @@ func (r *SIPRequest) MinSE() (int, error) {
 	return minSE, nil
 }
 
-// Expires returns the expiration time from the Contact or Expires header.
+// Expires は、ContactまたはExpiresヘッダーから有効期限を返します。
 func (r *SIPRequest) Expires() int {
-	expires := 3600 // Default expires
+	expires := 3600 // デフォルトの有効期限
 	contactHeader := r.GetHeader("Contact")
 	if strings.Contains(contactHeader, "expires=") {
 		parts := strings.Split(contactHeader, ";")

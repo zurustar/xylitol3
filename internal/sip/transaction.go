@@ -10,41 +10,41 @@ import (
 )
 
 var (
-	// RFC3261BranchMagicCookie is the magic cookie prefix for branch IDs.
+	// RFC3261BranchMagicCookie は、ブランチIDのマジッククッキープレフィックスです。
 	RFC3261BranchMagicCookie = "z9hG4bK"
-	// T1 is the RTT estimate, 500ms.
+	// T1 はRTTの推定値、500msです。
 	T1 = 500 * time.Millisecond
-	// T2 is the max retransmit interval for non-INVITE, 4s.
+	// T2 は非INVITEの最大再送間隔、4秒です。
 	T2 = 4 * time.Second
-	// T4 is the max message lifetime, 5s.
+	// T4 は最大メッセージ寿命、5秒です。
 	T4 = 5 * time.Second
 )
 
-// GenerateBranchID generates a new RFC3261 compliant branch ID.
+// GenerateBranchID は、新しいRFC3261準拠のブランチIDを生成します。
 func GenerateBranchID() string {
-	b := make([]byte, 8) // 16 hex characters
+	b := make([]byte, 8) // 16進数16文字
 	rand.Read(b)
 	return fmt.Sprintf("%s%s", RFC3261BranchMagicCookie, hex.EncodeToString(b))
 }
 
-// GenerateNonce generates a random hex string of length 2*n.
+// GenerateNonce は、長さ2*nのランダムな16進文字列を生成します。
 func GenerateNonce(n int) string {
 	b := make([]byte, n)
 	rand.Read(b)
 	return hex.EncodeToString(b)
 }
 
-// GenerateCallID generates a new random Call-ID.
+// GenerateCallID は、新しいランダムなCall-IDを生成します。
 func GenerateCallID() string {
 	return GenerateNonce(16)
 }
 
-// GenerateTag generates a new random tag for From/To headers.
+// GenerateTag は、From/Toヘッダー用の新しいランダムなタグを生成します。
 func GenerateTag() string {
 	return GenerateNonce(8)
 }
 
-// isReliable checks if the given transport protocol is reliable (e.g., TCP, SCTP, TLS).
+// isReliable は、指定されたトランスポートプロトコルが信頼性があるかどうか（例：TCP、SCTP、TLS）をチェックします。
 func isReliable(proto string) bool {
 	switch strings.ToUpper(proto) {
 	case "TCP", "SCTP", "TLS":
@@ -54,9 +54,9 @@ func isReliable(proto string) bool {
 	}
 }
 
-// --- Transaction Interfaces ---
+// --- トランザクションインターフェース ---
 
-// BaseTransaction is the base interface for all transactions.
+// BaseTransaction は、すべてのトランザクションの基本インターフェースです。
 type BaseTransaction interface {
 	ID() string
 	Done() <-chan bool
@@ -64,7 +64,7 @@ type BaseTransaction interface {
 	Transport() Transport
 }
 
-// ServerTransaction represents a server-side transaction.
+// ServerTransaction は、サーバー側のトランザクションを表します。
 type ServerTransaction interface {
 	BaseTransaction
 	Receive(*SIPRequest)
@@ -73,7 +73,7 @@ type ServerTransaction interface {
 	OriginalRequest() *SIPRequest
 }
 
-// ClientTransaction represents a client-side transaction.
+// ClientTransaction は、クライアント側のトランザクションを表します。
 type ClientTransaction interface {
 	BaseTransaction
 	Responses() <-chan *SIPResponse
@@ -82,22 +82,22 @@ type ClientTransaction interface {
 	LastResponse() *SIPResponse
 }
 
-// --- Transaction Manager ---
+// --- トランザクションマネージャー ---
 
-// TransactionManager manages all active SIP transactions.
+// TransactionManager は、すべてのアクティブなSIPトランザクションを管理します。
 type TransactionManager struct {
 	transactions map[string]BaseTransaction
 	mu           sync.RWMutex
 }
 
-// NewTransactionManager creates a new TransactionManager.
+// NewTransactionManager は、新しいTransactionManagerを作成します。
 func NewTransactionManager() *TransactionManager {
 	return &TransactionManager{
 		transactions: make(map[string]BaseTransaction),
 	}
 }
 
-// Get finds a transaction by its ID (branch ID).
+// Get は、ID（ブランチID）でトランザクションを検索します。
 func (tm *TransactionManager) Get(branchID string) (BaseTransaction, bool) {
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
@@ -105,20 +105,20 @@ func (tm *TransactionManager) Get(branchID string) (BaseTransaction, bool) {
 	return tx, ok
 }
 
-// Add adds a new transaction to the manager.
+// Add は、新しいトランザクションをマネージャーに追加します。
 func (tm *TransactionManager) Add(tx BaseTransaction) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	tm.transactions[tx.ID()] = tx
 
-	// Clean up the transaction from the map once it's terminated.
+	// トランザクションが終了したら、マップからクリーンアップします。
 	go func() {
 		<-tx.Done()
 		tm.Remove(tx.ID())
 	}()
 }
 
-// Remove removes a transaction from the manager.
+// Remove は、マネージャーからトランザクションを削除します。
 func (tm *TransactionManager) Remove(branchID string) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
