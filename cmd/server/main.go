@@ -18,9 +18,8 @@ func main() {
 	var (
 		webAddr = flag.String("web.addr", ":8080", "Web UIサーバーのアドレス")
 		sipAddr = flag.String("sip.addr", ":5060", "SIPサーバーのアドレス")
-		dbPath       = flag.String("db.path", "sip_users.db", "SQLiteデータベースファイルへのパス")
-		realm        = flag.String("sip.realm", "go-sip-server", "認証用のSIPレルム")
-		guidanceUser = flag.String("guidance.user", "announcement", "ガイダンスサービスをトリガーする特別なユーザー")
+		dbPath  = flag.String("db.path", "sip_users.db", "SQLiteデータベースファイルへのパス")
+		realm   = flag.String("sip.realm", "go-sip-server", "認証用のSIPレルム")
 	)
 	flag.Parse()
 
@@ -35,8 +34,18 @@ func main() {
 	defer s.Close()
 	log.Printf("ストレージをデータベースファイルで初期化しました: %s", *dbPath)
 
+	// ガイダンス設定をロードまたは初期化
+	guidanceUser, err := getOrSetDefaultSetting(s, "guidance_user", "announcement")
+	if err != nil {
+		log.Fatalf("ガイダンスユーザー設定のロードに失敗しました: %v", err)
+	}
+	guidanceAudio, err := getOrSetDefaultSetting(s, "guidance_audio", "audio/announcement.wav")
+	if err != nil {
+		log.Fatalf("ガイダンス音声設定のロードに失敗しました: %v", err)
+	}
+
 	// SIPサーバーを作成
-	sipServer := sip.NewSIPServer(s, *realm, *guidanceUser)
+	sipServer := sip.NewSIPServer(s, *realm, guidanceUser, guidanceAudio)
 
 	// Webサーバーを作成
 	webServer, err := web.NewServer(s, *realm, sipServer)
@@ -78,4 +87,22 @@ func main() {
 	} else {
 		log.Println("アプリケーションは正常にシャットダウンしています。")
 	}
+}
+
+// getOrSetDefaultSetting は、DBから設定を取得しようとします。
+// 存在しない場合は、デフォルト値を設定して返します。
+func getOrSetDefaultSetting(s *storage.Storage, key, defaultValue string) (string, error) {
+	value, err := s.GetSetting(key)
+	if err != nil {
+		return "", err
+	}
+	if value == "" {
+		log.Printf("設定 '%s' が見つかりません。デフォルト値 '%s' を設定します。", key, defaultValue)
+		if err := s.SetSetting(key, defaultValue); err != nil {
+			return "", err
+		}
+		return defaultValue, nil
+	}
+	log.Printf("設定 '%s' をDBからロードしました: '%s'", key, value)
+	return value, nil
 }

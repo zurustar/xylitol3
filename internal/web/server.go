@@ -72,6 +72,77 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/users", s.handleUsers)
 	mux.HandleFunc("/users/new", s.handleUsersNew)
 	mux.HandleFunc("/sessions", s.handleSessions)
+	mux.HandleFunc("/settings/guidance", s.handleGuidanceSettings)
+}
+
+func (s *Server) handleGuidanceSettings(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.handleGuidanceSettingsForm(w, r, nil)
+	case http.MethodPost:
+		s.handleGuidanceSettingsSubmit(w, r)
+	default:
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleGuidanceSettingsForm は、ガイダンス設定フォームを表示します。
+// 成功またはエラーメッセージを渡すために追加のデータを受け入れます。
+func (s *Server) handleGuidanceSettingsForm(w http.ResponseWriter, r *http.Request, data map[string]interface{}) {
+	if data == nil {
+		data = make(map[string]interface{})
+	}
+
+	// フォームに現在の値を事前入力します
+	user, audio := s.sipServer.GetGuidanceSettings()
+	data["GuidanceUser"] = user
+	data["GuidanceAudio"] = audio
+
+	tmpl := s.templates["guidance.html"]
+	if err := tmpl.Execute(w, data); err != nil {
+		log.Printf("Error executing guidance template: %v", err)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+	}
+}
+
+// handleGuidanceSettingsSubmit は、ガイダンス設定の更新を処理します。
+func (s *Server) handleGuidanceSettingsSubmit(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "Bad Request", http.StatusBadRequest)
+		return
+	}
+
+	guidanceUser := r.FormValue("guidance_user")
+	guidanceAudio := r.FormValue("guidance_audio")
+
+	if guidanceUser == "" || guidanceAudio == "" {
+		data := map[string]interface{}{
+			"Error": "SIPユーザーと音声ファイルパスの両方が必要です。",
+		}
+		s.handleGuidanceSettingsForm(w, r, data)
+		return
+	}
+
+	// 設定をDBに保存します
+	if err := s.storage.SetSetting("guidance_user", guidanceUser); err != nil {
+		log.Printf("Error saving guidance_user setting: %v", err)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+	if err := s.storage.SetSetting("guidance_audio", guidanceAudio); err != nil {
+		log.Printf("Error saving guidance_audio setting: %v", err)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+
+	// 実行中のSIPサーバーインスタンスを更新します
+	s.sipServer.UpdateGuidanceSettings(guidanceUser, guidanceAudio)
+
+	// 成功メッセージとともにフォームを再表示します
+	data := map[string]interface{}{
+		"Success": true,
+	}
+	s.handleGuidanceSettingsForm(w, r, data)
 }
 
 func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
