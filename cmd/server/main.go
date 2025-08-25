@@ -9,7 +9,6 @@ import (
 	"sip-server/internal/sip"
 	"sip-server/internal/storage"
 	"sip-server/internal/web"
-	"strings"
 	"syscall"
 
 	"golang.org/x/sync/errgroup"
@@ -37,29 +36,30 @@ func main() {
 	log.Printf("ストレージをデータベースファイルで初期化しました: %s", *dbPath)
 
 	// ガイダンス設定をロードまたは初期化
-	guidanceUserStr, err := getOrSetDefaultSetting(s, "guidance_user", "announcement")
+	guidanceSettings, err := s.GetGuidanceSettings()
 	if err != nil {
-		log.Fatalf("ガイダンスユーザー設定のロードに失敗しました: %v", err)
+		log.Fatalf("ガイダンス設定のロードに失敗しました: %v", err)
 	}
-	// カンマで分割し、各エントリの空白をトリムします
-	var guidanceUsers []string
-	if guidanceUserStr != "" {
-		users := strings.Split(guidanceUserStr, ",")
-		for _, u := range users {
-			trimmed := strings.TrimSpace(u)
-			if trimmed != "" {
-				guidanceUsers = append(guidanceUsers, trimmed)
-			}
+	if len(guidanceSettings) == 0 {
+		log.Println("ガイダンス設定が見つかりません。デフォルト設定を作成します。")
+		defaultSettings := []storage.GuidanceSetting{
+			{URI: "announcement", AudioFile: "audio/announcement.wav"},
 		}
+		if err := s.SetGuidanceSettings(defaultSettings); err != nil {
+			log.Fatalf("デフォルトのガイダンス設定の保存に失敗しました: %v", err)
+		}
+		guidanceSettings = defaultSettings
 	}
 
-	guidanceAudio, err := getOrSetDefaultSetting(s, "guidance_audio", "audio/announcement.wav")
-	if err != nil {
-		log.Fatalf("ガイダンス音声設定のロードに失敗しました: %v", err)
+	// SIPサーバーで使いやすいように、設定をマップに変換します
+	guidanceMap := make(map[string]string)
+	for _, setting := range guidanceSettings {
+		guidanceMap[setting.URI] = setting.AudioFile
 	}
+	log.Printf("%d個のガイダンス設定をロードしました。", len(guidanceMap))
 
 	// SIPサーバーを作成
-	sipServer := sip.NewSIPServer(s, *realm, guidanceUsers, guidanceAudio)
+	sipServer := sip.NewSIPServer(s, *realm, guidanceMap)
 
 	// Webサーバーを作成
 	webServer, err := web.NewServer(s, *realm, sipServer)
@@ -103,20 +103,3 @@ func main() {
 	}
 }
 
-// getOrSetDefaultSetting は、DBから設定を取得しようとします。
-// 存在しない場合は、デフォルト値を設定して返します。
-func getOrSetDefaultSetting(s *storage.Storage, key, defaultValue string) (string, error) {
-	value, err := s.GetSetting(key)
-	if err != nil {
-		return "", err
-	}
-	if value == "" {
-		log.Printf("設定 '%s' が見つかりません。デフォルト値 '%s' を設定します。", key, defaultValue)
-		if err := s.SetSetting(key, defaultValue); err != nil {
-			return "", err
-		}
-		return defaultValue, nil
-	}
-	log.Printf("設定 '%s' をDBからロードしました: '%s'", key, value)
-	return value, nil
-}

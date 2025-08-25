@@ -33,7 +33,7 @@ func TestSipProxy_InviteCancelFlow(t *testing.T) {
 	s, _ := storage.NewStorage(":memory:")
 	defer s.Close()
 	realm := "go-sip.test"
-	server := NewSIPServer(s, realm, nil, "")
+	server := NewSIPServer(s, realm, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

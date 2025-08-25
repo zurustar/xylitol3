@@ -50,53 +50,42 @@ type SIPServer struct {
 	tcpListener   *net.TCPListener
 
 	// ガイダンス設定
-	guidanceUsers     map[string]struct{} // 複数のガイダンスユーザーを効率的に検索するためのセット
-	guidanceAudioFile string
-	guidanceMutex     sync.RWMutex
+	guidanceSettings map[string]string // SIP URIから音声ファイルパスへのマッピング
+	guidanceMutex    sync.RWMutex
 }
 
 // NewSIPServer は、新しいSIPサーバーインスタンスを作成します。
-func NewSIPServer(s *storage.Storage, realm string, guidanceUsers []string, guidanceAudioFile string) *SIPServer {
-	users := make(map[string]struct{})
-	for _, u := range guidanceUsers {
-		users[u] = struct{}{}
-	}
+func NewSIPServer(s *storage.Storage, realm string, guidanceSettings map[string]string) *SIPServer {
 	return &SIPServer{
-		storage:           s,
-		txManager:         NewTransactionManager(),
-		registrations:     make(map[string][]Registration),
-		nonces:            make(map[string]time.Time),
-		realm:             realm,
-		sessions:          make(map[string]*SessionState),
-		b2buaByTx:         make(map[string]*B2BUA),
-		guidanceUsers:     users,
-		guidanceAudioFile: guidanceAudioFile,
+		storage:          s,
+		txManager:        NewTransactionManager(),
+		registrations:    make(map[string][]Registration),
+		nonces:           make(map[string]time.Time),
+		realm:            realm,
+		sessions:         make(map[string]*SessionState),
+		b2buaByTx:        make(map[string]*B2BUA),
+		guidanceSettings: guidanceSettings,
 	}
 }
 
 // UpdateGuidanceSettings は、ガイダンス設定を安全に更新します。
-func (s *SIPServer) UpdateGuidanceSettings(users []string, audioFile string) {
+func (s *SIPServer) UpdateGuidanceSettings(settings map[string]string) {
 	s.guidanceMutex.Lock()
 	defer s.guidanceMutex.Unlock()
-
-	userSet := make(map[string]struct{})
-	for _, u := range users {
-		userSet[u] = struct{}{}
-	}
-	s.guidanceUsers = userSet
-	s.guidanceAudioFile = audioFile
-	log.Printf("Updated guidance settings. Users: %v, AudioFile: %s", users, audioFile)
+	s.guidanceSettings = settings
+	log.Printf("Updated guidance settings to: %v", settings)
 }
 
 // GetGuidanceSettings は、現在のガイダンス設定を安全に取得します。
-func (s *SIPServer) GetGuidanceSettings() ([]string, string) {
+func (s *SIPServer) GetGuidanceSettings() map[string]string {
 	s.guidanceMutex.RLock()
 	defer s.guidanceMutex.RUnlock()
-	users := make([]string, 0, len(s.guidanceUsers))
-	for u := range s.guidanceUsers {
-		users = append(users, u)
+	// 変更を防ぐためにコピーを返します
+	clone := make(map[string]string, len(s.guidanceSettings))
+	for k, v := range s.guidanceSettings {
+		clone[k] = v
 	}
-	return users, s.guidanceAudioFile
+	return clone
 }
 
 // NewClientTx は、リクエストメソッドに基づいて新しいクライアントトランザクションを作成します。
@@ -485,14 +474,13 @@ func (s *SIPServer) handleInvite(req *SIPRequest, tx ServerTransaction) {
 
 	// ガイダンス設定を安全に読み取ります
 	s.guidanceMutex.RLock()
-	guidanceUsers := s.guidanceUsers
-	guidanceAudioFile := s.guidanceAudioFile
+	guidanceSettings := s.guidanceSettings
 	s.guidanceMutex.RUnlock()
 
 	// ガイダンスユーザーへの呼び出しを確認します
-	if _, ok := guidanceUsers[toURI.User]; ok {
-		log.Printf("Call to guidance user '%s'. Starting guidance app with audio '%s'.", toURI.User, guidanceAudioFile)
-		app := NewApp(s, tx, guidanceAudioFile)
+	if audioFile, ok := guidanceSettings[toURI.User]; ok {
+		log.Printf("Call to guidance user '%s'. Starting guidance app with audio '%s'.", toURI.User, audioFile)
+		app := NewApp(s, tx, audioFile)
 		go app.Run()
 		return
 	}
