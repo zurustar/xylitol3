@@ -6,28 +6,28 @@ import (
 	"net"
 )
 
-// Transport defines an interface for a SIP transport layer, which can be backed
-// by different network protocols like UDP, TCP, etc.
+// Transport は、UDP、TCPなどのさまざまなネットワークプロトコルでバックアップできる
+// SIPトランスポート層のインターフェースを定義します。
 type Transport interface {
-	// Writer is used to send a complete SIP message to the remote peer.
+	// Writer は、完全なSIPメッセージをリモートピアに送信するために使用されます。
 	io.Writer
-	// GetProto returns the transport protocol name (e.g., "UDP", "TCP").
+	// GetProto は、トランスポートプロトコル名（例：「UDP」、「TCP」）を返します。
 	GetProto() string
-	// GetRemoteAddr returns the network address of the remote peer.
+	// GetRemoteAddr は、リモートピアのネットワークアドレスを返します。
 	GetRemoteAddr() net.Addr
-	// Close terminates the transport connection if applicable.
+	// Close は、該当する場合にトランスポート接続を終了します。
 	Close() error
 }
 
-// --- UDP Transport ---
+// --- UDPトランスポート ---
 
-// UDPTransport is a transport implementation for UDP.
+// UDPTransport は、UDPのトランスポート実装です。
 type UDPTransport struct {
 	conn     net.PacketConn
 	destAddr net.Addr
 }
 
-// NewUDPTransport creates a new UDP transport instance.
+// NewUDPTransport は、新しいUDPトランスポートインスタンスを作成します。
 func NewUDPTransport(conn net.PacketConn, destAddr net.Addr) *UDPTransport {
 	return &UDPTransport{
 		conn:     conn,
@@ -35,43 +35,43 @@ func NewUDPTransport(conn net.PacketConn, destAddr net.Addr) *UDPTransport {
 	}
 }
 
-// Write sends data to the destination address over the UDP connection.
+// Write は、UDP接続を介して宛先アドレスにデータを送信します。
 func (t *UDPTransport) Write(p []byte) (n int, err error) {
 	return t.conn.WriteTo(p, t.destAddr)
 }
 
-// GetProto returns "UDP".
+// GetProto は「UDP」を返します。
 func (t *UDPTransport) GetProto() string {
 	return "UDP"
 }
 
-// GetRemoteAddr returns the destination network address.
+// GetRemoteAddr は、宛先ネットワークアドレスを返します。
 func (t *UDPTransport) GetRemoteAddr() net.Addr {
 	return t.destAddr
 }
 
-// Close for UDP is a no-op from the perspective of a single "transaction",
-// as the underlying PacketConn is shared and managed by the server listener.
+// Close は、単一の「トランザクション」の観点からは何もしません。
+// 基になるPacketConnはサーバーリスナーによって共有および管理されるためです。
 func (t *UDPTransport) Close() error {
 	return nil
 }
 
-// --- TCP Transport ---
+// --- TCPトランスポート ---
 
-// TCPTransport is a transport implementation for TCP.
+// TCPTransport は、TCPのトランスポート実装です。
 type TCPTransport struct {
 	conn net.Conn
 }
 
-// NewTCPTransport creates a new TCP transport instance.
+// NewTCPTransport は、新しいTCPトランスポートインスタンスを作成します。
 func NewTCPTransport(conn net.Conn) *TCPTransport {
 	return &TCPTransport{
 		conn: conn,
 	}
 }
 
-// Write sends data over the TCP connection.
-// The provided byte slice should be a fully-formed SIP message.
+// Write は、TCP接続を介してデータを送信します。
+// 提供されるバイトスライスは、完全に形成されたSIPメッセージである必要があります。
 func (t *TCPTransport) Write(p []byte) (n int, err error) {
 	n, err = t.conn.Write(p)
 	if err != nil {
@@ -83,17 +83,17 @@ func (t *TCPTransport) Write(p []byte) (n int, err error) {
 	return n, nil
 }
 
-// GetProto returns "TCP".
+// GetProto は「TCP」を返します。
 func (t *TCPTransport) GetProto() string {
 	return "TCP"
 }
 
-// GetRemoteAddr returns the remote network address of the connection.
+// GetRemoteAddr は、接続のリモートネットワークアドレスを返します。
 func (t *TCPTransport) GetRemoteAddr() net.Addr {
 	return t.conn.RemoteAddr()
 }
 
-// Close terminates the TCP connection.
+// Close は、TCP接続を終了します。
 func (t *TCPTransport) Close() error {
 	return t.conn.Close()
 }

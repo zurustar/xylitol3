@@ -11,7 +11,7 @@ import (
 	"sip-server/internal/storage"
 )
 
-// Server holds the dependencies for the web server.
+// Server は、Webサーバーの依存関係を保持します。
 type Server struct {
 	storage   *storage.Storage
 	templates map[string]*template.Template
@@ -19,7 +19,7 @@ type Server struct {
 	sipServer *sip.SIPServer
 }
 
-// NewServer creates a new web server instance.
+// NewServer は、新しいWebサーバーインスタンスを作成します。
 func NewServer(s *storage.Storage, realm string, sipServer *sip.SIPServer) (*Server, error) {
 	templates, err := parseTemplates()
 	if err != nil {
@@ -34,7 +34,7 @@ func NewServer(s *storage.Storage, realm string, sipServer *sip.SIPServer) (*Ser
 	}, nil
 }
 
-// Run starts the web server on the given address.
+// Run は、指定されたアドレスでWebサーバーを起動します。
 func (s *Server) Run(addr string) error {
 	mux := http.NewServeMux()
 	s.registerRoutes(mux)
@@ -52,8 +52,8 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/users", http.StatusFound)
 }
 
-// parseTemplates parses all .html files in the templates directory and returns a map
-// of template names to parsed templates.
+// parseTemplates は、templatesディレクトリ内のすべての.htmlファイルを解析し、
+// テンプレート名を解析済みテンプレートにマッピングしたマップを返します。
 func parseTemplates() (map[string]*template.Template, error) {
 	templates := make(map[string]*template.Template)
 	templateDir := filepath.Join("internal", "web", "templates")
@@ -142,15 +142,15 @@ func (s *Server) handleUsersNewSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// As per RFC 2617, the A1 part of digest auth is username:realm:password
-	// The password stored should be the MD5 hash of this string.
+	// RFC 2617によると、ダイジェスト認証のA1部分は username:realm:password です。
+	// 保存されるパスワードは、この文字列のMD5ハッシュである必要があります。
 	// H(A1) = MD5(username:realm:password)
 	ha1 := fmt.Sprintf("%s:%s:%s", username, s.realm, password)
 	ha1Hash := fmt.Sprintf("%x", md5.Sum([]byte(ha1)))
 
 	user := &storage.User{
 		Username: username,
-		Password: ha1Hash, // Storing the HA1 hash
+		Password: ha1Hash, // HA1ハッシュを保存します
 	}
 
 	if err := s.storage.AddUser(user); err != nil {

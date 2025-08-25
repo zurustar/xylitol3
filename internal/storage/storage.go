@@ -4,23 +4,23 @@ import (
 	"database/sql"
 	"fmt"
 
-	_ "github.com/glebarez/go-sqlite" // Pure go SQLite driver
+	_ "github.com/glebarez/go-sqlite" // 純粋なGoのSQLiteドライバ
 )
 
-// User represents a user account for SIP authentication.
+// User は、SIP認証用のユーザーアカウントを表します。
 type User struct {
 	ID       int64
 	Username string
-	Password string // This will store the HA1 hash as per RFC 2617/2069
+	Password string // これはRFC 2617/2069に従ってHA1ハッシュを保存します
 }
 
-// Storage handles database operations for the application.
+// Storage は、アプリケーションのデータベース操作を処理します。
 type Storage struct {
 	db *sql.DB
 }
 
-// NewStorage initializes a new storage service.
-// It opens a connection to the SQLite database and ensures the necessary tables exist.
+// NewStorage は、新しいストレージサービスを初期化します。
+// SQLiteデータベースへの接続を開き、必要なテーブルが存在することを確認します。
 func NewStorage(dataSourceName string) (*Storage, error) {
 	db, err := sql.Open("sqlite", dataSourceName)
 	if err != nil {
@@ -38,7 +38,7 @@ func NewStorage(dataSourceName string) (*Storage, error) {
 	return &Storage{db: db}, nil
 }
 
-// createTables sets up the database schema.
+// createTables は、データベーススキーマを設定します。
 func createTables(db *sql.DB) error {
 	const usersTable = `
 	CREATE TABLE IF NOT EXISTS users (
@@ -53,12 +53,12 @@ func createTables(db *sql.DB) error {
 	return nil
 }
 
-// Close closes the database connection.
+// Close は、データベース接続を閉じます。
 func (s *Storage) Close() error {
 	return s.db.Close()
 }
 
-// AddUser adds a new user to the database.
+// AddUser は、新しいユーザーをデータベースに追加します。
 func (s *Storage) AddUser(user *User) error {
 	stmt, err := s.db.Prepare("INSERT INTO users(username, password) VALUES(?, ?)")
 	if err != nil {
@@ -79,7 +79,7 @@ func (s *Storage) AddUser(user *User) error {
 	return nil
 }
 
-// GetUserByUsername retrieves a user from the database by their username.
+// GetUserByUsername は、ユーザー名でデータベースからユーザーを取得します。
 func (s *Storage) GetUserByUsername(username string) (*User, error) {
 	stmt, err := s.db.Prepare("SELECT id, username, password FROM users WHERE username = ?")
 	if err != nil {
@@ -91,14 +91,14 @@ func (s *Storage) GetUserByUsername(username string) (*User, error) {
 	err = stmt.QueryRow(username).Scan(&user.ID, &user.Username, &user.Password)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, nil // No user found is not an application error
+			return nil, nil // ユーザーが見つからないことはアプリケーションエラーではありません
 		}
 		return nil, fmt.Errorf("could not query user: %w", err)
 	}
 	return user, nil
 }
 
-// GetAllUsers retrieves all users from the database.
+// GetAllUsers は、データベースからすべてのユーザーを取得します。
 func (s *Storage) GetAllUsers() ([]*User, error) {
 	rows, err := s.db.Query("SELECT id, username, password FROM users ORDER BY username")
 	if err != nil {

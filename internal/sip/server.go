@@ -16,22 +16,22 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// Registration holds information about a user's registered location.
+// Registration は、ユーザーの登録された場所の情報を保持します。
 type Registration struct {
 	ContactURI string
 	ExpiresAt  time.Time
 }
 
-// SessionState holds the state for a session with an active session timer.
+// SessionState は、アクティブなセッションタイマーを持つセッションの状態を保持します。
 type SessionState struct {
 	DialogID  string
 	Interval  int
 	ExpiresAt time.Time
-	Refresher string // "uac" or "uas"
+	Refresher string // "uac" または "uas"
 	timer     *time.Timer
 }
 
-// SIPServer holds the dependencies for the SIP server.
+// SIPServer は、SIPサーバーの依存関係を保持します。
 type SIPServer struct {
 	storage       *storage.Storage
 	txManager     *TransactionManager
@@ -40,17 +40,17 @@ type SIPServer struct {
 	nonces        map[string]time.Time
 	nonceMutex    sync.Mutex
 	realm         string
-	listenAddr    string // The address this server is listening on, e.g., "1.2.3.4:5060"
+	listenAddr    string // このサーバーがリッスンしているアドレス（例: "1.2.3.4:5060"）
 	sessions      map[string]*SessionState
 	sessionMutex  sync.RWMutex
-	dialogs       sync.Map // Stores active B2BUA dialogs, keyed by dialog ID
-	b2buaByTx     map[string]*B2BUA // Keyed by A-leg transaction ID
+	dialogs       sync.Map          // アクティブなB2BUAダイアログをダイアログIDでキー付けして保存します
+	b2buaByTx     map[string]*B2BUA // AレッグのトランザクションIDでキー付け
 	b2buaMutex    sync.RWMutex
 	udpConn       net.PacketConn
 	tcpListener   *net.TCPListener
 }
 
-// NewSIPServer creates a new SIP server instance.
+// NewSIPServer は、新しいSIPサーバーインスタンスを作成します。
 func NewSIPServer(s *storage.Storage, realm string) *SIPServer {
 	return &SIPServer{
 		storage:       s,
@@ -63,7 +63,7 @@ func NewSIPServer(s *storage.Storage, realm string) *SIPServer {
 	}
 }
 
-// NewClientTx creates a new client transaction based on the request method.
+// NewClientTx は、リクエストメソッドに基づいて新しいクライアントトランザクションを作成します。
 func (s *SIPServer) NewClientTx(req *SIPRequest, transport Transport) (ClientTransaction, error) {
 	var clientTx ClientTransaction
 	var err error
@@ -80,31 +80,31 @@ func (s *SIPServer) NewClientTx(req *SIPRequest, transport Transport) (ClientTra
 	return clientTx, nil
 }
 
-// getDialogID generates a unique identifier for a dialog.
-// The order of tags is important for lookup.
+// getDialogID は、ダイアログの一意の識別子を生成します。
+// タグの順序はルックアップにとって重要です。
 func getDialogID(callID, fromTag, toTag string) string {
 	return fmt.Sprintf("%s:%s:%s", callID, fromTag, toTag)
 }
 
-// Run starts the SIP server, listening on both UDP and TCP ports.
+// Run は、SIPサーバーを起動し、UDPとTCPの両方のポートでリッスンします。
 func (s *SIPServer) Run(ctx context.Context, addr string) error {
 	g, gCtx := errgroup.WithContext(ctx)
 
-	// Resolve the address to get a common host/port for logging.
-	// We use UDP address resolution as the baseline.
+	// ログ記録のために共通のホスト/ポートを取得するためにアドレスを解決します。
+	// ベースラインとしてUDPアドレス解決を使用します。
 	udpAddr, err := net.ResolveUDPAddr("udp", addr)
 	if err != nil {
 		return fmt.Errorf("could not resolve UDP address: %w", err)
 	}
 	s.listenAddr = udpAddr.String()
 	if udpAddr.IP.IsUnspecified() {
-		// If listening on 0.0.0.0, use a loopback address for headers,
-		// assuming this is for local testing. A public IP should be configured
-		// in a real deployment.
+		// 0.0.0.0でリッスンしている場合、ヘッダーにはループバックアドレスを使用します。
+		// これはローカルテスト用と想定しています。実際のデプロイでは、
+		// パブリックIPを設定する必要があります。
 		s.listenAddr = fmt.Sprintf("127.0.0.1:%d", udpAddr.Port)
 	}
 
-	// --- UDP Listener ---
+	// --- UDPリスナー ---
 	g.Go(func() error {
 		pc, err := net.ListenPacket("udp", addr)
 		if err != nil {
@@ -124,7 +124,7 @@ func (s *SIPServer) Run(ctx context.Context, addr string) error {
 			n, clientAddr, err := pc.ReadFrom(buf)
 			if err != nil {
 				if gCtx.Err() != nil {
-					return nil // Graceful shutdown
+					return nil // 正常なシャットダウン
 				}
 				log.Printf("Error reading from UDP: %v", err)
 				continue
@@ -136,7 +136,7 @@ func (s *SIPServer) Run(ctx context.Context, addr string) error {
 		}
 	})
 
-	// --- TCP Listener ---
+	// --- TCPリスナー ---
 	g.Go(func() error {
 		listener, err := net.Listen("tcp", addr)
 		if err != nil {
@@ -155,7 +155,7 @@ func (s *SIPServer) Run(ctx context.Context, addr string) error {
 			conn, err := listener.Accept()
 			if err != nil {
 				if gCtx.Err() != nil {
-					return nil // Graceful shutdown
+					return nil // 正常なシャットダウン
 				}
 				log.Printf("Error accepting TCP connection: %v", err)
 				continue
@@ -168,7 +168,7 @@ func (s *SIPServer) Run(ctx context.Context, addr string) error {
 	return g.Wait()
 }
 
-// handleConnection reads SIP messages from a TCP connection in a loop and dispatches them.
+// handleConnection は、TCP接続からSIPメッセージをループで読み取り、それらをディスパッチします。
 func (s *SIPServer) handleConnection(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 	transport := NewTCPTransport(conn)
@@ -211,7 +211,7 @@ func (s *SIPServer) handleConnection(ctx context.Context, conn net.Conn) {
 	}
 }
 
-// parseContentLength is a helper to extract the Content-Length value from SIP headers.
+// parseContentLength は、SIPヘッダーからContent-Length値を抽出するためのヘルパーです。
 func parseContentLength(headerStr string) int {
 	lines := strings.Split(headerStr, "\r\n")
 	for _, line := range lines {
@@ -230,11 +230,11 @@ func parseContentLength(headerStr string) int {
 	return 0
 }
 
-// dispatchMessage determines if an incoming message is a request or a response
-// and routes it to the appropriate handler.
+// dispatchMessage は、受信メッセージがリクエストかレスポンスかを判断し、
+// 適切なハンドラーにルーティングします。
 func (s *SIPServer) dispatchMessage(transport Transport, rawMsg string) {
-	// Peek at the first line to see if it's a request or response.
-	// Requests start with a method (e.g., INVITE, ACK), responses start with "SIP/2.0".
+	// 最初の行を覗き見て、リクエストかレスポンスかを確認します。
+	// リクエストはメソッド（例：INVITE、ACK）で始まり、レスポンスは「SIP/2.0」で始まります。
 	if strings.HasPrefix(rawMsg, "SIP/2.0") {
 		s.handleResponse(transport, rawMsg)
 	} else {
@@ -242,8 +242,8 @@ func (s *SIPServer) dispatchMessage(transport Transport, rawMsg string) {
 	}
 }
 
-// handleResponse parses an incoming SIP response and passes it to the
-// appropriate client transaction.
+// handleResponse は、受信したSIPレスポンスを解析し、
+// 適切なクライアントトランザクションに渡します。
 func (s *SIPServer) handleResponse(transport Transport, rawMsg string) {
 	res, err := ParseSIPResponse(rawMsg)
 	if err != nil {
@@ -272,8 +272,8 @@ func (s *SIPServer) handleResponse(transport Transport, rawMsg string) {
 	}
 }
 
-// handleRequest is the entry point for all incoming SIP requests.
-// It manages transactions and dispatches requests to the appropriate handlers.
+// handleRequest は、すべての受信SIPリクエストのエントリポイントです。
+// トランザクションを管理し、リクエストを適切なハンドラーにディスパッチします。
 func (s *SIPServer) handleRequest(transport Transport, rawMsg string) {
 	req, err := ParseSIPRequest(rawMsg)
 	if err != nil {
@@ -281,12 +281,12 @@ func (s *SIPServer) handleRequest(transport Transport, rawMsg string) {
 		return
 	}
 
-	// RFC 3261 Section 16.3 Item 3: Loop Detection
+	// RFC 3261 セクション 16.3 アイテム 3: ループ検出
 	vias, err := req.AllVias()
 	if err != nil {
 		log.Printf("Error parsing Via headers: %v", err)
-		// We can't be sure about loops, but the request is likely malformed.
-		// For now, we'll let it fail later if it's critical.
+		// ループについては確信が持てませんが、リクエストは不正な形式である可能性が高いです。
+		// とりあえず、それがクリティカルであれば後で失敗させます。
 	} else {
 		listenHost, listenPort, _ := net.SplitHostPort(s.listenAddr)
 		if listenHost == "" {
@@ -294,11 +294,11 @@ func (s *SIPServer) handleRequest(transport Transport, rawMsg string) {
 		}
 
 		for _, via := range vias {
-			// Compare the host and port of the Via header with our own listen address.
+			// Viaヘッダーのホストとポートを、私たち自身のリッスンアドレスと比較します。
 			viaPort := via.Port
 			if viaPort == "" {
-				// Per RFC 3261 Section 18.2.1, if the port is absent, the default
-				// is 5060 for sip, and 5061 for sips. We only handle sip here.
+				// RFC 3261 セクション 18.2.1 によると、ポートがない場合、デフォルトは
+				// sipの場合は5060、sipsの場合は5061です。ここではsipのみを扱います。
 				viaPort = "5060"
 			}
 
@@ -308,18 +308,18 @@ func (s *SIPServer) handleRequest(transport Transport, rawMsg string) {
 				if _, err := transport.Write([]byte(res.String())); err != nil {
 					log.Printf("Error sending 482 Loop Detected response: %v", err)
 				}
-				return // Stop processing
+				return // 処理を停止
 			}
 		}
 	}
 
-	// For in-dialog requests (except for initial INVITE), we need to find the B2BUA.
+	// ダイアログ内リクエスト（最初のINVITEを除く）の場合、B2BUAを見つける必要があります。
 	if req.Method != "INVITE" {
-		// This is a simplified dialog lookup. A robust implementation would handle loose routing.
+		// これは簡略化されたダイアログルックアップです。堅牢な実装では、ルーズルーティングを処理します。
 		dialogID := getDialogID(req.GetHeader("Call-ID"), getTag(req.GetHeader("From")), getTag(req.GetHeader("To")))
 		if val, ok := s.dialogs.Load(dialogID); ok {
 			b2bua := val.(*B2BUA)
-			// These requests need a transaction to be handled statefully by the B2BUA.
+			// これらのリクエストは、B2BUAによってステートフルに処理されるためにトランザクションを必要とします。
 			srvTx, err := NewNonInviteServerTx(req, transport)
 			if err != nil {
 				log.Printf("Error creating server transaction for in-dialog request: %v", err)
@@ -331,13 +331,13 @@ func (s *SIPServer) handleRequest(transport Transport, rawMsg string) {
 		}
 	}
 
-	// Per RFC 3261, CANCEL is a special hop-by-hop request.
+	// RFC 3261によると、CANCELは特別なホップバイホップのリクエストです。
 	if req.Method == "CANCEL" {
 		s.handleCancel(transport, req)
 		return
 	}
 
-	// ACK for a non-2xx response might not have a dialog yet.
+	// 2xx以外のレスポンスに対するACKには、まだダイアログがない場合があります。
 	if req.Method == "ACK" {
 		topVia, err := req.TopVia()
 		if err == nil {
@@ -367,7 +367,7 @@ func (s *SIPServer) handleRequest(transport Transport, rawMsg string) {
 		return
 	}
 
-	// Check for retransmissions.
+	// 再送を確認します。
 	if tx, ok := s.txManager.Get(branchID); ok {
 		log.Printf("Retransmission of %s received for transaction %s", req.Method, branchID)
 		if srvTx, ok := tx.(ServerTransaction); ok {
@@ -376,7 +376,7 @@ func (s *SIPServer) handleRequest(transport Transport, rawMsg string) {
 		return
 	}
 
-	// If it's a new request, create a new transaction.
+	// 新しいリクエストの場合は、新しいトランザクションを作成します。
 	log.Printf("New request received, creating transaction %s for method %s", branchID, req.Method)
 	var srvTx ServerTransaction
 	switch req.Method {
@@ -400,7 +400,7 @@ func (s *SIPServer) handleRequest(transport Transport, rawMsg string) {
 	go s.handleTransaction(srvTx)
 }
 
-// handleTransaction is the Transaction User (TU) for server transactions.
+// handleTransaction は、サーバートランザクションのトランザクションユーザー（TU）です。
 func (s *SIPServer) handleTransaction(srvTx ServerTransaction) {
 	select {
 	case req := <-srvTx.Requests():
@@ -413,7 +413,7 @@ func (s *SIPServer) handleTransaction(srvTx ServerTransaction) {
 		case "INVITE", "UPDATE":
 			s.handleInvite(req, srvTx)
 		default:
-			// BYE and other in-dialog methods are handled in handleRequest
+			// BYEおよびその他のダイアログ内メソッドはhandleRequestで処理されます
 			res := BuildResponse(405, "Method Not Allowed", req, nil)
 			if err := srvTx.Respond(res); err != nil {
 				log.Printf("Error sending response to transaction %s: %v", srvTx.ID(), err)
@@ -423,10 +423,10 @@ func (s *SIPServer) handleTransaction(srvTx ServerTransaction) {
 	}
 }
 
-// handleInvite decides whether to start a B2BUA for a new call or
-// pass a re-INVITE to an existing dialog.
+// handleInvite は、新しいコールのためにB2BUAを開始するか、
+// 既存のダイアログにre-INVITEを渡すかを決定します。
 func (s *SIPServer) handleInvite(req *SIPRequest, tx ServerTransaction) {
-	// A re-INVITE will have a To-tag. An initial INVITE will not.
+	// re-INVITEにはToタグがあります。最初のINVITEにはありません。
 	if getTag(req.GetHeader("To")) != "" {
 		dialogID := getDialogID(req.GetHeader("Call-ID"), getTag(req.GetHeader("From")), getTag(req.GetHeader("To")))
 		if val, ok := s.dialogs.Load(dialogID); ok {
@@ -440,7 +440,7 @@ func (s *SIPServer) handleInvite(req *SIPRequest, tx ServerTransaction) {
 		return
 	}
 
-	// This is an initial INVITE, so we set up a new B2BUA.
+	// これは最初のINVITEなので、新しいB2BUAをセットアップします。
 	toURI, err := req.GetSIPURIHeader("To")
 	if err != nil {
 		tx.Respond(BuildResponse(400, "Bad Request", req, map[string]string{"Warning": "Malformed To header"}))
@@ -487,7 +487,7 @@ func (s *SIPServer) handleInvite(req *SIPRequest, tx ServerTransaction) {
 	s.b2buaByTx[tx.ID()] = b2bua
 	s.b2buaMutex.Unlock()
 
-	// The B2BUA is responsible for this transaction from now on.
+	// これ以降、このトランザクションはB2BUAが担当します。
 	go b2bua.Run(targetContact)
 }
 
@@ -546,14 +546,14 @@ func (s *SIPServer) updateRegistration(req *SIPRequest) {
 	contactHeader := req.GetHeader("Contact")
 	expires := req.Expires()
 
-	// Handle wildcard un-registration
+	// ワイルドカードによる登録解除を処理します
 	if contactHeader == "*" && expires == 0 {
 		delete(s.registrations, username)
 		log.Printf("Unregistered all contacts for user '%s'", username)
 		return
 	}
 
-	// Per RFC 3261, a REGISTER can have multiple contacts in a comma-separated list.
+	// RFC 3261によると、REGISTERはカンマ区切りのリストで複数のコンタクトを持つことができます。
 	contactHeaders := strings.Split(contactHeader, ",")
 
 	for _, singleContact := range contactHeaders {
@@ -671,7 +671,7 @@ func (s *SIPServer) validateNonce(nonce string) bool {
 func (s *SIPServer) handleCancel(transport Transport, req *SIPRequest) {
 	log.Printf("Handling CANCEL request for Call-ID %s", req.GetHeader("Call-ID"))
 
-	// Immediately respond 200 OK to the CANCEL request, as per RFC 3261.
+	// RFC 3261に従い、CANCELリクエストに即座に200 OKで応答します。
 	res200 := BuildResponse(200, "OK", req, nil)
 	if _, err := transport.Write([]byte(res200.String())); err != nil {
 		log.Printf("Error sending 200 OK for CANCEL: %v", err)
@@ -704,17 +704,17 @@ func createCancelRequest(inviteReq *SIPRequest) *SIPRequest {
 		Headers: make(map[string]string),
 		Body:    []byte{},
 	}
-	// Copy essential headers per RFC 3261 Section 16.3
+	// RFC 3261 セクション 16.3 に従って、必須ヘッダーをコピーします
 	for _, h := range []string{"From", "To", "Call-ID", "Via"} {
 		cancelReq.Headers[h] = inviteReq.Headers[h]
 	}
 
-	// CSeq number must be the same, but the method is CANCEL
+	// CSeq番号は同じでなければなりませんが、メソッドはCANCELです
 	cseqStr := inviteReq.GetHeader("CSeq")
 	if parts := strings.SplitN(cseqStr, " ", 2); len(parts) == 2 {
 		cancelReq.Headers["CSeq"] = parts[0] + " CANCEL"
 	} else {
-		// This should not happen with valid requests
+		// 有効なリクエストではこれは起こらないはずです
 		cancelReq.Headers["CSeq"] = "1 CANCEL"
 	}
 	cancelReq.Headers["Max-Forwards"] = "70"
@@ -781,7 +781,7 @@ func (s *SIPServer) expireSession(dialogID string) {
 	}
 }
 
-// SessionInfo provides a snapshot of an active session for display purposes.
+// SessionInfo は、表示目的でアクティブなセッションのスナップショットを提供します。
 type SessionInfo struct {
 	Caller   string
 	Callee   string
@@ -789,13 +789,13 @@ type SessionInfo struct {
 	CallID   string
 }
 
-// GetActiveSessions returns a slice of SessionInfo for all active dialogs.
+// GetActiveSessions は、すべてのアクティブなダイアログのSessionInfoのスライスを返します。
 func (s *SIPServer) GetActiveSessions() []SessionInfo {
 	var sessions []SessionInfo
 	s.dialogs.Range(func(key, value interface{}) bool {
 		b2bua, ok := value.(*B2BUA)
 		if !ok {
-			return true // continue
+			return true // 続行
 		}
 
 		b2bua.mu.RLock()
@@ -805,9 +805,9 @@ func (s *SIPServer) GetActiveSessions() []SessionInfo {
 			return true
 		}
 
-		// To avoid showing the same session twice (since we store by both a-leg and b-leg dialog IDs),
-		// we only act when we're iterating on the A-leg's ID.
-		// Also check that the dialog has been fully established.
+		// 同じセッションを2回表示しないようにするため（a-legとb-legの両方のダイアログIDで保存しているため）、
+		// A-legのIDで反復処理している場合にのみアクションを実行します。
+		// また、ダイアログが完全に確立されていることも確認します。
 		if b2bua.aLegDialogID == "" || key.(string) != b2bua.aLegDialogID {
 			return true
 		}
@@ -821,7 +821,7 @@ func (s *SIPServer) GetActiveSessions() []SessionInfo {
 		}
 		sessions = append(sessions, info)
 
-		return true // continue iteration
+		return true // 反復処理を続行
 	})
 	return sessions
 }

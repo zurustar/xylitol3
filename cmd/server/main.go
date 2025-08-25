@@ -14,67 +14,67 @@ import (
 )
 
 func main() {
-	// --- Configuration ---
+	// --- 設定 ---
 	var (
-		webAddr = flag.String("web.addr", ":8080", "Address for the web UI server")
-		sipAddr = flag.String("sip.addr", ":5060", "Address for the SIP server")
-		dbPath  = flag.String("db.path", "sip_users.db", "Path to the SQLite database file")
-		realm   = flag.String("sip.realm", "go-sip-server", "SIP realm for authentication")
+		webAddr = flag.String("web.addr", ":8080", "Web UIサーバーのアドレス")
+		sipAddr = flag.String("sip.addr", ":5060", "SIPサーバーのアドレス")
+		dbPath  = flag.String("db.path", "sip_users.db", "SQLiteデータベースファイルへのパス")
+		realm   = flag.String("sip.realm", "go-sip-server", "認証用のSIPレルム")
 	)
 	flag.Parse()
 
-	// --- Application Setup ---
-	log.Println("Initializing application...")
+	// --- アプリケーションのセットアップ ---
+	log.Println("アプリケーションを初期化しています...")
 
-	// Initialize storage
+	// ストレージを初期化
 	s, err := storage.NewStorage(*dbPath)
 	if err != nil {
-		log.Fatalf("Failed to initialize storage: %v", err)
+		log.Fatalf("ストレージの初期化に失敗しました: %v", err)
 	}
 	defer s.Close()
-	log.Printf("Storage initialized with database file: %s", *dbPath)
+	log.Printf("ストレージをデータベースファイルで初期化しました: %s", *dbPath)
 
-	// Create SIP server
+	// SIPサーバーを作成
 	sipServer := sip.NewSIPServer(s, *realm)
 
-	// Create web server
+	// Webサーバーを作成
 	webServer, err := web.NewServer(s, *realm, sipServer)
 	if err != nil {
-		log.Fatalf("Failed to create web server: %v", err)
+		log.Fatalf("Webサーバーの作成に失敗しました: %v", err)
 	}
 
-	// --- Server Execution ---
+	// --- サーバーの実行 ---
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	g, gCtx := errgroup.WithContext(ctx)
 
-	// Start web server
+	// Webサーバーを起動
 	g.Go(func() error {
-		log.Printf("Web server starting on %s", *webAddr)
+		log.Printf("Webサーバーを %s で起動しています", *webAddr)
 		if err := webServer.Run(*webAddr); err != nil {
-			log.Printf("Web server failed: %v", err)
+			log.Printf("Webサーバーでエラーが発生しました: %v", err)
 			return err
 		}
 		return nil
 	})
 
-	// Start SIP server
+	// SIPサーバーを起動
 	g.Go(func() error {
-		log.Printf("SIP server starting on %s", *sipAddr)
+		log.Printf("SIPサーバーを %s で起動しています", *sipAddr)
 		if err := sipServer.Run(gCtx, *sipAddr); err != nil {
-			log.Printf("SIP server failed: %v", err)
+			log.Printf("SIPサーバーでエラーが発生しました: %v", err)
 			return err
 		}
 		return nil
 	})
 
-	log.Println("Application started. Press Ctrl+C to exit.")
+	log.Println("アプリケーションが起動しました。Ctrl+Cで終了します。")
 
-	// Wait for shutdown signal or for a server to fail
+	// シャットダウンシグナルまたはサーバーのエラーを待機します
 	if err := g.Wait(); err != nil {
-		log.Printf("Application exited with error: %v", err)
+		log.Printf("アプリケーションはエラーで終了しました: %v", err)
 	} else {
-		log.Println("Application shutting down gracefully.")
+		log.Println("アプリケーションは正常にシャットダウンしています。")
 	}
 }

@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// InviteClientTxState defines the states for an INVITE client transaction.
+// InviteClientTxState は、INVITEクライアントトランザクションの状態を定義します。
 type InviteClientTxState int
 
 const (
@@ -16,7 +16,7 @@ const (
 	InviteClientTxStateTerminated
 )
 
-// InviteClientTx implements the client-side INVITE transaction state machine.
+// InviteClientTx は、クライアント側のINVITEトランザクションのステートマシンを実装します。
 type InviteClientTx struct {
 	id           string
 	request      *SIPRequest
@@ -98,7 +98,7 @@ func (tx *InviteClientTx) ReceiveResponse(res *SIPResponse) {
 	if res.StatusCode >= 100 && res.StatusCode < 200 {
 		if tx.state == InviteClientTxStateCalling {
 			tx.state = InviteClientTxStateProceeding
-			// Per RFC 3261 Section 17.1.1.2, stop retransmitting on provisional response.
+			// RFC 3261 セクション 17.1.1.2 に従い、暫定応答で再送を停止します。
 			if tx.timerA != nil {
 				tx.timerA.Stop()
 			}
@@ -112,7 +112,7 @@ func (tx *InviteClientTx) ReceiveResponse(res *SIPResponse) {
 		if tx.state == InviteClientTxStateCalling || tx.state == InviteClientTxStateProceeding {
 			tx.state = InviteClientTxStateCompleted
 			sendResponseToTU(res)
-			tx.sendAck(res) // Send ACK for non-2xx final response
+			tx.sendAck(res) // 2xx以外の最終応答に対してACKを送信します
 			if isReliable(tx.transport.GetProto()) {
 				tx.mu.Unlock()
 				tx.Terminate()
@@ -120,7 +120,7 @@ func (tx *InviteClientTx) ReceiveResponse(res *SIPResponse) {
 			}
 			tx.timerD = time.AfterFunc(32*time.Second, tx.Terminate)
 		} else if tx.state == InviteClientTxStateCompleted {
-			// Retransmission of the final response. The transaction re-sends the ACK.
+			// 最終応答の再送。トランザクションはACKを再送します。
 			tx.sendAck(res)
 		}
 		tx.mu.Unlock()
@@ -131,8 +131,8 @@ func (tx *InviteClientTx) ReceiveResponse(res *SIPResponse) {
 		if tx.state == InviteClientTxStateCalling || tx.state == InviteClientTxStateProceeding {
 			tx.state = InviteClientTxStateTerminated
 			sendResponseToTU(res)
-			// No need to unlock, Terminate will be called by run() which will unlock.
-			// However, direct call to Terminate is better. Let's unlock and terminate.
+			// ロックを解除する必要はありません。run()からTerminateが呼び出され、そこでロックが解除されます。
+			// ただし、Terminateを直接呼び出す方が良いでしょう。ロックを解除して終了しましょう。
 			tx.mu.Unlock()
 			tx.Terminate()
 			return
@@ -165,12 +165,12 @@ func (tx *InviteClientTx) run() {
 
 func (tx *InviteClientTx) startTimerA(interval time.Duration) {
 	if isReliable(tx.transport.GetProto()) {
-		return // Do not retransmit INVITE over reliable transport
+		return // 信頼性の高いトランスポートでINVITEを再送しないでください
 	}
 	tx.timerA = time.AfterFunc(interval, func() {
 		tx.mu.Lock()
 		defer tx.mu.Unlock()
-		// Per RFC, retransmissions are only sent in the "Calling" state.
+		// RFCによると、再送は「呼び出し中」状態でのみ送信されます。
 		if tx.state != InviteClientTxStateCalling {
 			return
 		}

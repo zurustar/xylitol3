@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// NonInviteClientTxState defines the states for a non-INVITE client transaction.
+// NonInviteClientTxState は、非INVITEクライアントトランザクションの状態を定義します。
 type NonInviteClientTxState int
 
 const (
@@ -16,7 +16,7 @@ const (
 	NonInviteClientTxStateTerminated
 )
 
-// NonInviteClientTx implements the client-side non-INVITE transaction state machine.
+// NonInviteClientTx は、クライアント側の非INVITEトランザクションステートマシンを実装します。
 type NonInviteClientTx struct {
 	id           string
 	request      *SIPRequest
@@ -129,7 +129,7 @@ func (tx *NonInviteClientTx) run() {
 
 func (tx *NonInviteClientTx) startTimerE(interval time.Duration) {
 	if isReliable(tx.transport.GetProto()) {
-		return // Do not retransmit requests over reliable transport
+		return // 信頼性の高いトランスポートでリクエストを再送しないでください
 	}
 	tx.timerE = time.AfterFunc(interval, func() {
 		tx.mu.Lock()

@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// NonInviteServerTxState defines the states for a non-INVITE server transaction.
+// NonInviteServerTxState は、非INVITEサーバートランザクションの状態を定義します。
 type NonInviteServerTxState int
 
 const (
@@ -17,7 +17,7 @@ const (
 	NonInviteServerTxStateTerminated
 )
 
-// NonInviteServerTx implements the server-side non-INVITE transaction state machine.
+// NonInviteServerTx は、サーバー側の非INVITEトランザクションステートマシンを実装します。
 type NonInviteServerTx struct {
 	id           string
 	originalReq  *SIPRequest
@@ -31,7 +31,7 @@ type NonInviteServerTx struct {
 	transport    Transport
 }
 
-// NewNonInviteServerTx creates and starts a new non-INVITE server transaction.
+// NewNonInviteServerTx は、新しい非INVITEサーバートランザクションを作成して開始します。
 func NewNonInviteServerTx(req *SIPRequest, transport Transport) (ServerTransaction, error) {
 	topVia, err := req.TopVia()
 	if err != nil {
@@ -53,7 +53,7 @@ func NewNonInviteServerTx(req *SIPRequest, transport Transport) (ServerTransacti
 	}
 
 	go tx.run()
-	tx.requests <- req // Pass the initial request to the TU
+	tx.requests <- req // 最初の要求をTUに渡します
 
 	return tx, nil
 }
@@ -134,11 +134,11 @@ func (tx *NonInviteServerTx) run() {
 			tx.send(res)
 			if res.StatusCode >= 200 {
 				tx.state = NonInviteServerTxStateCompleted
-				// For reliable transports, terminate immediately. For unreliable, start Timer J.
+				// 信頼性の高いトランスポートの場合はすぐに終了します。信頼性の低い場合はタイマーJを開始します。
 				if isReliable(tx.transport.GetProto()) {
-					tx.mu.Unlock() // Unlock before calling Terminate
+					tx.mu.Unlock() // Terminateを呼び出す前にロックを解除します
 					tx.Terminate()
-					return // End the goroutine
+					return // ゴルーチンを終了します
 				}
 				tx.timerJ = time.AfterFunc(64*T1, tx.Terminate)
 			} else {
