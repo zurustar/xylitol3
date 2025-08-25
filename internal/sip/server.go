@@ -50,13 +50,17 @@ type SIPServer struct {
 	tcpListener   *net.TCPListener
 
 	// ガイダンス設定
-	guidanceUser      string
+	guidanceUsers     map[string]struct{} // 複数のガイダンスユーザーを効率的に検索するためのセット
 	guidanceAudioFile string
 	guidanceMutex     sync.RWMutex
 }
 
 // NewSIPServer は、新しいSIPサーバーインスタンスを作成します。
-func NewSIPServer(s *storage.Storage, realm string, guidanceUser string, guidanceAudioFile string) *SIPServer {
+func NewSIPServer(s *storage.Storage, realm string, guidanceUsers []string, guidanceAudioFile string) *SIPServer {
+	users := make(map[string]struct{})
+	for _, u := range guidanceUsers {
+		users[u] = struct{}{}
+	}
 	return &SIPServer{
 		storage:           s,
 		txManager:         NewTransactionManager(),
@@ -65,25 +69,34 @@ func NewSIPServer(s *storage.Storage, realm string, guidanceUser string, guidanc
 		realm:             realm,
 		sessions:          make(map[string]*SessionState),
 		b2buaByTx:         make(map[string]*B2BUA),
-		guidanceUser:      guidanceUser,
+		guidanceUsers:     users,
 		guidanceAudioFile: guidanceAudioFile,
 	}
 }
 
 // UpdateGuidanceSettings は、ガイダンス設定を安全に更新します。
-func (s *SIPServer) UpdateGuidanceSettings(user, audioFile string) {
+func (s *SIPServer) UpdateGuidanceSettings(users []string, audioFile string) {
 	s.guidanceMutex.Lock()
 	defer s.guidanceMutex.Unlock()
-	s.guidanceUser = user
+
+	userSet := make(map[string]struct{})
+	for _, u := range users {
+		userSet[u] = struct{}{}
+	}
+	s.guidanceUsers = userSet
 	s.guidanceAudioFile = audioFile
-	log.Printf("Updated guidance settings. User: %s, AudioFile: %s", user, audioFile)
+	log.Printf("Updated guidance settings. Users: %v, AudioFile: %s", users, audioFile)
 }
 
 // GetGuidanceSettings は、現在のガイダンス設定を安全に取得します。
-func (s *SIPServer) GetGuidanceSettings() (string, string) {
+func (s *SIPServer) GetGuidanceSettings() ([]string, string) {
 	s.guidanceMutex.RLock()
 	defer s.guidanceMutex.RUnlock()
-	return s.guidanceUser, s.guidanceAudioFile
+	users := make([]string, 0, len(s.guidanceUsers))
+	for u := range s.guidanceUsers {
+		users = append(users, u)
+	}
+	return users, s.guidanceAudioFile
 }
 
 // NewClientTx は、リクエストメソッドに基づいて新しいクライアントトランザクションを作成します。
@@ -472,12 +485,12 @@ func (s *SIPServer) handleInvite(req *SIPRequest, tx ServerTransaction) {
 
 	// ガイダンス設定を安全に読み取ります
 	s.guidanceMutex.RLock()
-	guidanceUser := s.guidanceUser
+	guidanceUsers := s.guidanceUsers
 	guidanceAudioFile := s.guidanceAudioFile
 	s.guidanceMutex.RUnlock()
 
 	// ガイダンスユーザーへの呼び出しを確認します
-	if guidanceUser != "" && toURI.User == guidanceUser {
+	if _, ok := guidanceUsers[toURI.User]; ok {
 		log.Printf("Call to guidance user '%s'. Starting guidance app with audio '%s'.", toURI.User, guidanceAudioFile)
 		app := NewApp(s, tx, guidanceAudioFile)
 		go app.Run()

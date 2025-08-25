@@ -9,7 +9,9 @@ import (
 	"sip-server/internal/sip"
 	"sip-server/internal/storage"
 	"sip-server/internal/web"
+	"strings"
 	"syscall"
+
 	"golang.org/x/sync/errgroup"
 )
 
@@ -35,17 +37,29 @@ func main() {
 	log.Printf("ストレージをデータベースファイルで初期化しました: %s", *dbPath)
 
 	// ガイダンス設定をロードまたは初期化
-	guidanceUser, err := getOrSetDefaultSetting(s, "guidance_user", "announcement")
+	guidanceUserStr, err := getOrSetDefaultSetting(s, "guidance_user", "announcement")
 	if err != nil {
 		log.Fatalf("ガイダンスユーザー設定のロードに失敗しました: %v", err)
 	}
+	// カンマで分割し、各エントリの空白をトリムします
+	var guidanceUsers []string
+	if guidanceUserStr != "" {
+		users := strings.Split(guidanceUserStr, ",")
+		for _, u := range users {
+			trimmed := strings.TrimSpace(u)
+			if trimmed != "" {
+				guidanceUsers = append(guidanceUsers, trimmed)
+			}
+		}
+	}
+
 	guidanceAudio, err := getOrSetDefaultSetting(s, "guidance_audio", "audio/announcement.wav")
 	if err != nil {
 		log.Fatalf("ガイダンス音声設定のロードに失敗しました: %v", err)
 	}
 
 	// SIPサーバーを作成
-	sipServer := sip.NewSIPServer(s, *realm, guidanceUser, guidanceAudio)
+	sipServer := sip.NewSIPServer(s, *realm, guidanceUsers, guidanceAudio)
 
 	// Webサーバーを作成
 	webServer, err := web.NewServer(s, *realm, sipServer)
