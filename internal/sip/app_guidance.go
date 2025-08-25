@@ -20,7 +20,6 @@ import (
 )
 
 const (
-	wavFilePath       = "audio/announcement.wav"
 	rtpSampleRate     = 8000 // PCMUのサンプルレート
 	rtpPacketDuration = 20   // 20msのRTPパケット
 )
@@ -32,6 +31,7 @@ type App struct {
 	peerConnection *webrtc.PeerConnection
 	audioTrack     *webrtc.TrackLocalStaticRTP
 	done           chan struct{} // PeerConnectionが閉じたときに通知するチャネル
+	wavFilePath    string        // 再生するWAVファイルのパス
 
 	// BYEを送信するためのダイアログ状態
 	callID       string
@@ -43,12 +43,13 @@ type App struct {
 }
 
 // NewApp は、新しいガイダンスアプリケーションインスタンスを作成します。
-func NewApp(server *SIPServer, tx ServerTransaction) *App {
+func NewApp(server *SIPServer, tx ServerTransaction, wavFilePath string) *App {
 	return &App{
-		server:   server,
-		inviteTx: tx,
-		cseq:     1, // BYEの初期CSeqは1ですが、INVITEから取得する必要があります
-		done:     make(chan struct{}),
+		server:      server,
+		inviteTx:    tx,
+		wavFilePath: wavFilePath,
+		cseq:        1, // BYEの初期CSeqは1ですが、INVITEから取得する必要があります
+		done:        make(chan struct{}),
 	}
 }
 
@@ -176,9 +177,9 @@ func (a *App) streamWavFile() {
 		a.peerConnection.Close()
 	}()
 
-	file, err := os.Open(wavFilePath)
+	file, err := os.Open(a.wavFilePath)
 	if err != nil {
-		log.Printf("GuidanceApp: Could not open wav file: %v", err)
+		log.Printf("GuidanceApp: Could not open wav file %s: %v", a.wavFilePath, err)
 		return
 	}
 	defer file.Close()

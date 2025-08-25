@@ -48,21 +48,42 @@ type SIPServer struct {
 	b2buaMutex    sync.RWMutex
 	udpConn       net.PacketConn
 	tcpListener   *net.TCPListener
-	GuidanceUser  string
+
+	// ガイダンス設定
+	guidanceUser      string
+	guidanceAudioFile string
+	guidanceMutex     sync.RWMutex
 }
 
 // NewSIPServer は、新しいSIPサーバーインスタンスを作成します。
-func NewSIPServer(s *storage.Storage, realm string, guidanceUser string) *SIPServer {
+func NewSIPServer(s *storage.Storage, realm string, guidanceUser string, guidanceAudioFile string) *SIPServer {
 	return &SIPServer{
-		storage:       s,
-		txManager:     NewTransactionManager(),
-		registrations: make(map[string][]Registration),
-		nonces:        make(map[string]time.Time),
-		realm:         realm,
-		sessions:      make(map[string]*SessionState),
-		b2buaByTx:     make(map[string]*B2BUA),
-		GuidanceUser:  guidanceUser,
+		storage:           s,
+		txManager:         NewTransactionManager(),
+		registrations:     make(map[string][]Registration),
+		nonces:            make(map[string]time.Time),
+		realm:             realm,
+		sessions:          make(map[string]*SessionState),
+		b2buaByTx:         make(map[string]*B2BUA),
+		guidanceUser:      guidanceUser,
+		guidanceAudioFile: guidanceAudioFile,
 	}
+}
+
+// UpdateGuidanceSettings は、ガイダンス設定を安全に更新します。
+func (s *SIPServer) UpdateGuidanceSettings(user, audioFile string) {
+	s.guidanceMutex.Lock()
+	defer s.guidanceMutex.Unlock()
+	s.guidanceUser = user
+	s.guidanceAudioFile = audioFile
+	log.Printf("Updated guidance settings. User: %s, AudioFile: %s", user, audioFile)
+}
+
+// GetGuidanceSettings は、現在のガイダンス設定を安全に取得します。
+func (s *SIPServer) GetGuidanceSettings() (string, string) {
+	s.guidanceMutex.RLock()
+	defer s.guidanceMutex.RUnlock()
+	return s.guidanceUser, s.guidanceAudioFile
 }
 
 // NewClientTx は、リクエストメソッドに基づいて新しいクライアントトランザクションを作成します。
@@ -449,10 +470,16 @@ func (s *SIPServer) handleInvite(req *SIPRequest, tx ServerTransaction) {
 		return
 	}
 
+	// ガイダンス設定を安全に読み取ります
+	s.guidanceMutex.RLock()
+	guidanceUser := s.guidanceUser
+	guidanceAudioFile := s.guidanceAudioFile
+	s.guidanceMutex.RUnlock()
+
 	// ガイダンスユーザーへの呼び出しを確認します
-	if s.GuidanceUser != "" && toURI.User == s.GuidanceUser {
-		log.Printf("Call to guidance user '%s'. Starting guidance app.", toURI.User)
-		app := NewApp(s, tx)
+	if guidanceUser != "" && toURI.User == guidanceUser {
+		log.Printf("Call to guidance user '%s'. Starting guidance app with audio '%s'.", toURI.User, guidanceAudioFile)
+		app := NewApp(s, tx, guidanceAudioFile)
 		go app.Run()
 		return
 	}

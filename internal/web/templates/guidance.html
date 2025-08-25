@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>ガイダンス設定</title>
+    <style>
+        body { font-family: sans-serif; margin: 2em; }
+        nav { margin-bottom: 1em; }
+        nav a { margin-right: 1em; }
+        .success { color: green; }
+        .error { color: red; }
+    </style>
+</head>
+<body>
+    <nav>
+        <a href="/users">ユーザー管理</a>
+        <a href="/sessions">アクティブセッション</a>
+        <a href="/settings/guidance">ガイダンス設定</a>
+    </nav>
+    <h1>ガイダンス設定</h1>
+
+    {{if .Success}}
+    <p class="success">設定が正常に更新されました。</p>
+    {{end}}
+    {{if .Error}}
+    <p class="error">{{.Error}}</p>
+    {{end}}
+
+    <form method="post">
+        <p>
+            <label for="guidance_user">ガイダンスSIPユーザー:</label><br>
+            <input type="text" id="guidance_user" name="guidance_user" value="{{.GuidanceUser}}" required>
+        </p>
+        <p>
+            <label for="guidance_audio">ガイダンス音声ファイルパス:</label><br>
+            <input type="text" id="guidance_audio" name="guidance_audio" value="{{.GuidanceAudio}}" required>
+        </p>
+        <p>
+            <button type="submit">保存</button>
+        </p>
+    </form>
+</body>
+</html>

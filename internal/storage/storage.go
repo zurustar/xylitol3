@@ -50,6 +50,17 @@ func createTables(db *sql.DB) error {
 	if _, err := db.Exec(usersTable); err != nil {
 		return fmt.Errorf("could not create users table: %w", err)
 	}
+
+	const settingsTable = `
+	CREATE TABLE IF NOT EXISTS settings (
+		key TEXT PRIMARY KEY,
+		value TEXT NOT NULL
+	);
+	`
+	if _, err := db.Exec(settingsTable); err != nil {
+		return fmt.Errorf("could not create settings table: %w", err)
+	}
+
 	return nil
 }
 
@@ -120,4 +131,33 @@ func (s *Storage) GetAllUsers() ([]*User, error) {
 	}
 
 	return users, nil
+}
+
+// GetSetting は、キーに基づいて設定値を取得します。
+func (s *Storage) GetSetting(key string) (string, error) {
+	var value string
+	err := s.db.QueryRow("SELECT value FROM settings WHERE key = ?", key).Scan(&value)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "", nil // 見つからないことはエラーではなく、空の文字列を返します
+		}
+		return "", fmt.Errorf("could not query setting for key %s: %w", key, err)
+	}
+	return value, nil
+}
+
+// SetSetting は、設定値をデータベースに保存または更新します。
+// 同じキーを持つ既存の値は上書きされます。
+func (s *Storage) SetSetting(key, value string) error {
+	// SQLiteでは `INSERT OR REPLACE` を使用して "upsert" を行います
+	stmt, err := s.db.Prepare("INSERT OR REPLACE INTO settings(key, value) VALUES(?, ?)")
+	if err != nil {
+		return fmt.Errorf("could not prepare statement for setting: %w", err)
+	}
+	defer stmt.Close()
+
+	if _, err := stmt.Exec(key, value); err != nil {
+		return fmt.Errorf("could not execute statement for setting key %s: %w", key, err)
+	}
+	return nil
 }
