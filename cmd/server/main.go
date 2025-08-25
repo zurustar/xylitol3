@@ -18,8 +18,9 @@ func main() {
 	var (
 		webAddr = flag.String("web.addr", ":8080", "Web UIサーバーのアドレス")
 		sipAddr = flag.String("sip.addr", ":5060", "SIPサーバーのアドレス")
-		dbPath  = flag.String("db.path", "sip_users.db", "SQLiteデータベースファイルへのパス")
-		realm   = flag.String("sip.realm", "go-sip-server", "認証用のSIPレルム")
+		dbPath       = flag.String("db.path", "sip_users.db", "SQLiteデータベースファイルへのパス")
+		realm        = flag.String("sip.realm", "go-sip-server", "認証用のSIPレルム")
+		guidanceUser = flag.String("guidance.user", "announcement", "ガイダンスサービスをトリガーする特別なユーザー")
 	)
 	flag.Parse()
 
@@ -35,7 +36,7 @@ func main() {
 	log.Printf("ストレージをデータベースファイルで初期化しました: %s", *dbPath)
 
 	// SIPサーバーを作成
-	sipServer := sip.NewSIPServer(s, *realm)
+	sipServer := sip.NewSIPServer(s, *realm, *guidanceUser)
 
 	// Webサーバーを作成
 	webServer, err := web.NewServer(s, *realm, sipServer)

@@ -48,10 +48,11 @@ type SIPServer struct {
 	b2buaMutex    sync.RWMutex
 	udpConn       net.PacketConn
 	tcpListener   *net.TCPListener
+	GuidanceUser  string
 }
 
 // NewSIPServer は、新しいSIPサーバーインスタンスを作成します。
-func NewSIPServer(s *storage.Storage, realm string) *SIPServer {
+func NewSIPServer(s *storage.Storage, realm string, guidanceUser string) *SIPServer {
 	return &SIPServer{
 		storage:       s,
 		txManager:     NewTransactionManager(),
@@ -60,6 +61,7 @@ func NewSIPServer(s *storage.Storage, realm string) *SIPServer {
 		realm:         realm,
 		sessions:      make(map[string]*SessionState),
 		b2buaByTx:     make(map[string]*B2BUA),
+		GuidanceUser:  guidanceUser,
 	}
 }
 
@@ -316,7 +318,7 @@ func (s *SIPServer) handleRequest(transport Transport, rawMsg string) {
 	// ダイアログ内リクエスト（最初のINVITEを除く）の場合、B2BUAを見つける必要があります。
 	if req.Method != "INVITE" {
 		// これは簡略化されたダイアログルックアップです。堅牢な実装では、ルーズルーティングを処理します。
-		dialogID := getDialogID(req.GetHeader("Call-ID"), getTag(req.GetHeader("From")), getTag(req.GetHeader("To")))
+		dialogID := getDialogID(req.GetHeader("Call-ID"), GetTag(req.GetHeader("From")), GetTag(req.GetHeader("To")))
 		if val, ok := s.dialogs.Load(dialogID); ok {
 			b2bua := val.(*B2BUA)
 			// これらのリクエストは、B2BUAによってステートフルに処理されるためにトランザクションを必要とします。
@@ -427,8 +429,8 @@ func (s *SIPServer) handleTransaction(srvTx ServerTransaction) {
 // 既存のダイアログにre-INVITEを渡すかを決定します。
 func (s *SIPServer) handleInvite(req *SIPRequest, tx ServerTransaction) {
 	// re-INVITEにはToタグがあります。最初のINVITEにはありません。
-	if getTag(req.GetHeader("To")) != "" {
-		dialogID := getDialogID(req.GetHeader("Call-ID"), getTag(req.GetHeader("From")), getTag(req.GetHeader("To")))
+	if GetTag(req.GetHeader("To")) != "" {
+		dialogID := getDialogID(req.GetHeader("Call-ID"), GetTag(req.GetHeader("From")), GetTag(req.GetHeader("To")))
 		if val, ok := s.dialogs.Load(dialogID); ok {
 			b2bua := val.(*B2BUA)
 			log.Printf("Passing re-INVITE to existing B2BUA for dialog %s", dialogID)
@@ -446,6 +448,15 @@ func (s *SIPServer) handleInvite(req *SIPRequest, tx ServerTransaction) {
 		tx.Respond(BuildResponse(400, "Bad Request", req, map[string]string{"Warning": "Malformed To header"}))
 		return
 	}
+
+	// ガイダンスユーザーへの呼び出しを確認します
+	if s.GuidanceUser != "" && toURI.User == s.GuidanceUser {
+		log.Printf("Call to guidance user '%s'. Starting guidance app.", toURI.User)
+		app := NewApp(s, tx)
+		go app.Run()
+		return
+	}
+
 	if toURI.Host != s.realm {
 		log.Printf("Request for unknown realm: %s", toURI.Host)
 		tx.Respond(BuildResponse(404, "Not Found", req, nil))
@@ -721,7 +732,8 @@ func createCancelRequest(inviteReq *SIPRequest) *SIPRequest {
 	return cancelReq
 }
 
-func getTag(headerValue string) string {
+// GetTag は、ヘッダー値からtagパラメータを抽出します。
+func GetTag(headerValue string) string {
 	parts := strings.Split(headerValue, ";")
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
@@ -738,8 +750,8 @@ func (s *SIPServer) createOrUpdateSession(upstreamTx ServerTransaction, finalRes
 	}
 
 	callID := finalResponse.GetHeader("Call-ID")
-	fromTag := getTag(finalResponse.GetHeader("From"))
-	toTag := getTag(finalResponse.GetHeader("To"))
+	fromTag := GetTag(finalResponse.GetHeader("From"))
+	toTag := GetTag(finalResponse.GetHeader("To"))
 
 	if callID == "" || fromTag == "" || toTag == "" {
 		log.Printf("Cannot create session state: missing Call-ID or tags in 2xx response.")
@@ -824,4 +836,25 @@ func (s *SIPServer) GetActiveSessions() []SessionInfo {
 		return true // 反復処理を続行
 	})
 	return sessions
+}
+
+// ListenAddr は、サーバーのリッスンアドレスを返します。
+func (s *SIPServer) ListenAddr() string {
+	return s.listenAddr
+}
+
+// TransportFor は、指定された宛先へのトランスポートを返します。
+// 現在、UDPのみをサポートしています。
+func (s *SIPServer) TransportFor(host, port, proto string) (Transport, error) {
+	if strings.ToUpper(proto) != "UDP" {
+		return nil, fmt.Errorf("transport protocol %s not supported", proto)
+	}
+
+	destAddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(host, port))
+	if err != nil {
+		return nil, fmt.Errorf("could not resolve destination UDP address '%s:%s': %w", host, port, err)
+	}
+
+	// 既存のUDP接続を再利用します
+	return NewUDPTransport(s.udpConn, destAddr), nil
 }

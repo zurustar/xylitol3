@@ -317,7 +317,7 @@ func (b *B2BUA) createVirtualUASResponse(virtualUASReq *SIPRequest, virtualUACRe
 	// 仮想UACレッグのレスポンスが2xxだった場合、独自のContactヘッダーとToタグを追加する必要があります。
 	if virtualUASRes.StatusCode >= 200 && virtualUASRes.StatusCode < 300 {
 		virtualUASRes.Headers["Contact"] = fmt.Sprintf("<sip:%s>", b.server.listenAddr)
-		if getTag(virtualUASRes.Headers["To"]) == "" {
+		if GetTag(virtualUASRes.Headers["To"]) == "" {
 			virtualUASRes.Headers["To"] = fmt.Sprintf("%s;tag=%s", virtualUASRes.Headers["To"], GenerateTag())
 		}
 	}
@@ -333,13 +333,13 @@ func (b *B2BUA) establishDialogs(virtualUASRes, virtualUACRes *SIPResponse) {
 
 	b.virtualUASDialogID = getDialogID(
 		virtualUASRes.GetHeader("Call-ID"),
-		getTag(virtualUASRes.GetHeader("From")),
-		getTag(virtualUASRes.GetHeader("To")),
+		GetTag(virtualUASRes.GetHeader("From")),
+		GetTag(virtualUASRes.GetHeader("To")),
 	)
 	b.virtualUACDialogID = getDialogID(
 		virtualUACRes.GetHeader("Call-ID"),
-		getTag(virtualUACRes.GetHeader("From")),
-		getTag(virtualUACRes.GetHeader("To")),
+		GetTag(virtualUACRes.GetHeader("From")),
+		GetTag(virtualUACRes.GetHeader("To")),
 	)
 
 	b.server.dialogs.Store(b.virtualUASDialogID, b)
@@ -396,7 +396,7 @@ func (b *B2BUA) HandleInDialogRequest(req *SIPRequest, tx ServerTransaction) {
 
 	// リクエストが仮想UASレッグから来たか仮想UACレッグから来たかを判断します。
 	// これは簡略化されたチェックです。堅牢な実装では、両方のダイアログIDをチェックします。
-	reqDialogID := getDialogID(req.GetHeader("Call-ID"), getTag(req.GetHeader("From")), getTag(req.GetHeader("To")))
+	reqDialogID := getDialogID(req.GetHeader("Call-ID"), GetTag(req.GetHeader("From")), GetTag(req.GetHeader("To")))
 
 	if reqDialogID == virtualUASDialogID {
 		b.handleVirtualUASRequest(req, tx)
@@ -465,8 +465,8 @@ func (b *B2BUA) createVirtualUACAck(virtualUACRes *SIPResponse) *SIPRequest {
 		return nil
 	}
 
-	virtualUACToTag := getTag(virtualUACRes.GetHeader("To"))
-	virtualUACFromTag := getTag(virtualUACRes.GetHeader("From"))
+	virtualUACToTag := GetTag(virtualUACRes.GetHeader("To"))
+	virtualUACFromTag := GetTag(virtualUACRes.GetHeader("From"))
 	virtualUACCallID := virtualUACRes.GetHeader("Call-ID")
 	virtualUACCSeq := virtualUACRes.GetHeader("CSeq")
 	virtualUACContact := virtualUACRes.GetHeader("Contact")
