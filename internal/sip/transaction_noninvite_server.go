@@ -111,6 +111,13 @@ func (tx *NonInviteServerTx) OriginalRequest() *SIPRequest {
 	return tx.originalReq
 }
 
+// LastResponseは、このトランザクションで送信された最後のレスポンスを返します。
+func (tx *NonInviteServerTx) LastResponse() *SIPResponse {
+	tx.mu.RLock()
+	defer tx.mu.RUnlock()
+	return tx.lastResponse
+}
+
 func (tx *NonInviteServerTx) Transport() Transport {
 	return tx.transport
 }

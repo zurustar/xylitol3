@@ -25,6 +25,7 @@
                 <th>Callee</th>
                 <th>Duration</th>
                 <th>Call-ID</th>
+                <th>アクション</th>
             </tr>
         </thead>
         <tbody>
@@ -35,11 +36,17 @@
                         <td>{{.Callee}}</td>
                         <td>{{.Duration}}</td>
                         <td>{{.CallID}}</td>
+                        <td>
+                            <form action="/sessions/disconnect" method="post" style="margin:0;">
+                                <input type="hidden" name="call_id" value="{{.CallID}}">
+                                <button type="submit">切断</button>
+                            </form>
+                        </td>
                     </tr>
                 {{end}}
             {{else}}
                 <tr>
-                    <td colspan="4">No active sessions.</td>
+                    <td colspan="5">No active sessions.</td>
                 </tr>
             {{end}}
         </tbody>

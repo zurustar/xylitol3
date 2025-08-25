@@ -73,6 +73,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/users", s.handleUsers)
 	mux.HandleFunc("/users/new", s.handleUsersNew)
 	mux.HandleFunc("/sessions", s.handleSessions)
+	mux.HandleFunc("/sessions/disconnect", s.handleSessionDisconnect)
 	mux.HandleFunc("/settings/guidance", s.handleGuidanceSettings)
 }
 
@@ -104,6 +105,34 @@ func (s *Server) handleGuidanceSettingsForm(w http.ResponseWriter, r *http.Reque
 		log.Printf("Error executing guidance template: %v", err)
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 	}
+}
+
+func (s *Server) handleSessionDisconnect(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "Bad Request", http.StatusBadRequest)
+		return
+	}
+
+	callID := r.FormValue("call_id")
+	if callID == "" {
+		http.Error(w, "Bad Request: Missing call_id", http.StatusBadRequest)
+		return
+	}
+
+	log.Printf("Received request to disconnect call with Call-ID: %s", callID)
+	disconnected := s.sipServer.DisconnectSession(callID)
+	if !disconnected {
+		// セッションが見つからなかった場合でも、おそらくすでに終了しているため、
+		// エラーを表示するのではなく、単にリダイレクトします。
+		log.Printf("Could not find session with Call-ID %s to disconnect, it may have already ended.", callID)
+	}
+
+	http.Redirect(w, r, "/sessions", http.StatusFound)
 }
 
 // handleGuidanceSettingsSubmit は、ガイダンス設定の更新を処理します。

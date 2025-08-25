@@ -63,6 +63,11 @@ func (tx *InviteServerTx) ID() string { return tx.id }
 func (tx *InviteServerTx) Done() <-chan bool { return tx.done }
 func (tx *InviteServerTx) Requests() <-chan *SIPRequest { return tx.requests }
 func (tx *InviteServerTx) OriginalRequest() *SIPRequest { return tx.originalReq }
+func (tx *InviteServerTx) LastResponse() *SIPResponse {
+	tx.mu.RLock()
+	defer tx.mu.RUnlock()
+	return tx.lastResponse
+}
 
 func (tx *InviteServerTx) Transport() Transport {
 	return tx.transport
