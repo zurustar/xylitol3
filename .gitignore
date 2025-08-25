@@ -33,3 +33,6 @@ sip-server
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Database file
+sip_users.db
