@@ -53,7 +53,7 @@ func main() {
 	// Webサーバーを起動
 	g.Go(func() error {
 		log.Printf("Webサーバーを %s で起動しています", *webAddr)
-		if err := webServer.Run(*webAddr); err != nil {
+		if err := webServer.Run(gCtx, *webAddr); err != nil {
 			log.Printf("Webサーバーでエラーが発生しました: %v", err)
 			return err
 		}

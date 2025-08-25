@@ -1,7 +1,9 @@
 package web
 
 import (
+	"context"
 	"crypto/md5"
+	"errors"
 	"fmt"
 	"html/template"
 	"log"
@@ -9,6 +11,7 @@ import (
 	"path/filepath"
 	"sip-server/internal/sip"
 	"sip-server/internal/storage"
+	"time"
 )
 
 // Server は、Webサーバーの依存関係を保持します。
@@ -34,11 +37,34 @@ func NewServer(s *storage.Storage, realm string, sipServer *sip.SIPServer) (*Ser
 	}, nil
 }
 
-// Run は、指定されたアドレスでWebサーバーを起動します。
-func (s *Server) Run(addr string) error {
+// Run は、指定されたアドレスでWebサーバーを起動し、正常なシャットダウンを処理します。
+func (s *Server) Run(ctx context.Context, addr string) error {
 	mux := http.NewServeMux()
 	s.registerRoutes(mux)
-	return http.ListenAndServe(addr, mux)
+
+	server := &http.Server{
+		Addr:    addr,
+		Handler: mux,
+	}
+
+	// コンテキストのキャンセルをリッスンするゴルーチンを起動します
+	go func() {
+		<-ctx.Done()
+		// 正常にシャットダウンするために5秒のタイムアウトを与えます
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			log.Printf("Webサーバーのシャットダウンエラー: %v", err)
+		}
+	}()
+
+	// サーバーを起動します
+	err := server.ListenAndServe()
+	if errors.Is(err, http.ErrServerClosed) {
+		// これはShutdownが呼び出されたときの期待されるエラーなので、nilを返すことができます。
+		return nil
+	}
+	return err
 }
 
 func (s *Server) registerRoutes(mux *http.ServeMux) {
