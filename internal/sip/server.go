@@ -883,6 +883,39 @@ func (s *SIPServer) ListenAddr() string {
 	return s.listenAddr
 }
 
+// DisconnectSession は、Call-IDに基づいてアクティブなセッションを検索し、それを切断します。
+func (s *SIPServer) DisconnectSession(callID string) bool {
+	var b2buaToDisconnect *B2BUA
+	var found bool
+
+	s.dialogs.Range(func(key, value interface{}) bool {
+		b2bua, ok := value.(*B2BUA)
+		if !ok {
+			return true // 続行
+		}
+
+		b2bua.mu.RLock()
+		origReq := b2bua.virtualUASTx.OriginalRequest()
+		b2bua.mu.RUnlock()
+
+		if origReq != nil && origReq.GetHeader("Call-ID") == callID {
+			b2buaToDisconnect = b2bua
+			found = true
+			return false // 検索を停止
+		}
+		return true // 続行
+	})
+
+	if found {
+		log.Printf("Found B2BUA for Call-ID %s, initiating disconnect.", callID)
+		go b2buaToDisconnect.Disconnect()
+		return true
+	}
+
+	log.Printf("No active B2BUA found for Call-ID %s.", callID)
+	return false
+}
+
 // TransportFor は、指定された宛先へのトランスポートを返します。
 // 現在、UDPのみをサポートしています。
 func (s *SIPServer) TransportFor(host, port, proto string) (Transport, error) {

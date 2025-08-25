@@ -512,6 +512,141 @@ func (b *B2BUA) sendRequestOnVirtualUACLeg(req *SIPRequest) {
 	b.virtualUACTx.Transport().Write([]byte(req.String()))
 }
 
+// Disconnectは、両方のレッグにBYEを送信して通話を強制的に終了させます。
+func (b *B2BUA) Disconnect() {
+	log.Printf("B2BUA: Forcibly disconnecting call with Call-ID %s", b.virtualUASTx.OriginalRequest().GetHeader("Call-ID"))
+
+	b.mu.RLock()
+	virtualUASTx := b.virtualUASTx
+	virtualUACTx := b.virtualUACTx
+	virtualUASDialogID := b.virtualUASDialogID
+	virtualUACDialogID := b.virtualUACDialogID
+	b.mu.RUnlock()
+
+	// レッグ1（仮想UACレッグ - 被呼者へ）にBYEを送信します
+	if virtualUACTx != nil && virtualUACDialogID != "" {
+		byeReq := b.createByeRequestForUACLeg(virtualUACDialogID, virtualUACTx)
+		if byeReq != nil {
+			// 新しい非INVITEクライアントトランザクションを作成してBYEを送信します
+			byeTx, err := b.server.NewClientTx(byeReq, virtualUACTx.Transport())
+			if err != nil {
+				log.Printf("B2BUA: Error creating client transaction for BYE to UAC: %v", err)
+			} else {
+				go func() {
+					// 応答をリッスンしますが、ここでは何もしません
+					<-byeTx.Responses()
+					log.Printf("B2BUA: Received response for BYE to UAC leg.")
+				}()
+			}
+		}
+	}
+
+	// レッグ2（仮想UASレッグ - 発呼者へ）にBYEを送信します
+	if virtualUASTx != nil && virtualUASDialogID != "" {
+		byeReq := b.createByeRequestForUASLeg(virtualUASDialogID, virtualUASTx)
+		if byeReq != nil {
+			// BYEは新しいリクエストなので、新しいクライアントトランザクションが必要です。
+			// 元の発呼者へのトランスポートを取得します。
+			transport := virtualUASTx.Transport()
+			byeTx, err := b.server.NewClientTx(byeReq, transport)
+			if err != nil {
+				log.Printf("B2BUA: Error creating client transaction for BYE to UAS: %v", err)
+			} else {
+				go func() {
+					<-byeTx.Responses()
+					log.Printf("B2BUA: Received response for BYE to UAS leg.")
+				}()
+			}
+		}
+	}
+
+	// 最後に、すべての状態をクリーンアップします
+	b.cleanup()
+}
+
+// createByeRequestForUACLegは、仮想UACレッグ（被呼者）用のBYEリクエストを作成します。
+func (b *B2BUA) createByeRequestForUACLeg(dialogID string, uacTx ClientTransaction) *SIPRequest {
+	origInvite := uacTx.OriginalRequest()
+	lastRes := uacTx.LastResponse()
+	if lastRes == nil {
+		log.Printf("B2BUA: Cannot create BYE for UAC leg, no final response available.")
+		return nil
+	}
+
+	// ダイアログ情報を取得します
+	callID := lastRes.GetHeader("Call-ID")
+	fromTag := GetTag(lastRes.GetHeader("From"))
+	toTag := GetTag(lastRes.GetHeader("To"))
+	contactHeader := lastRes.GetHeader("Contact")
+	contactURI, err := ParseSIPURI(contactHeader)
+	if err != nil {
+		log.Printf("B2BUA: Could not parse Contact URI from UAC response: %v", err)
+		return nil
+	}
+
+	// CSeqをインクリメントする必要があります
+	cseqStr := origInvite.GetHeader("CSeq")
+	cseq, _ := strconv.Atoi(strings.Fields(cseqStr)[0])
+
+	byeReq := &SIPRequest{
+		Method: "BYE",
+		URI:    contactURI.String(),
+		Proto:  "SIP/2.0",
+		Headers: map[string]string{
+			"Via":          fmt.Sprintf("SIP/2.0/%s %s;branch=%s", strings.ToUpper(uacTx.Transport().GetProto()), b.server.listenAddr, GenerateBranchID()),
+			"From":         fmt.Sprintf("%s;tag=%s", origInvite.GetHeader("From"), fromTag),
+			"To":           fmt.Sprintf("%s;tag=%s", origInvite.GetHeader("To"), toTag),
+			"Call-ID":      callID,
+			"CSeq":         fmt.Sprintf("%d BYE", cseq+10), // 元のCSeqから十分に高い値にします
+			"Max-Forwards": "70",
+		},
+		Body: []byte{},
+	}
+	return byeReq
+}
+
+// createByeRequestForUASLegは、仮想UASレッグ（発呼者）用のBYEリクエストを作成します。
+func (b *B2BUA) createByeRequestForUASLeg(dialogID string, uasTx ServerTransaction) *SIPRequest {
+	origReq := uasTx.OriginalRequest()
+	lastRes := uasTx.LastResponse()
+	if lastRes == nil {
+		log.Printf("B2BUA: Cannot create BYE for UAS leg, no final response sent.")
+		return nil
+	}
+
+	// ダイアログ情報を取得します
+	callID := lastRes.GetHeader("Call-ID")
+	fromTag := GetTag(lastRes.GetHeader("To")) // From/ToはUASの視点からは逆になります
+	toTag := GetTag(lastRes.GetHeader("From"))
+
+	// 発呼者の連絡先URIは、元のINVITEのContactヘッダーから取得する必要があります
+	contactURI, err := origReq.GetSIPURIHeader("Contact")
+	if err != nil {
+		log.Printf("B2BUA: Could not parse Contact URI from original INVITE: %v", err)
+		return nil
+	}
+
+	// CSeqをインクリメントする必要があります
+	cseqStr := origReq.GetHeader("CSeq")
+	cseq, _ := strconv.Atoi(strings.Fields(cseqStr)[0])
+
+	byeReq := &SIPRequest{
+		Method: "BYE",
+		URI:    contactURI.String(),
+		Proto:  "SIP/2.0",
+		Headers: map[string]string{
+			"Via":          fmt.Sprintf("SIP/2.0/%s %s;branch=%s", strings.ToUpper(uasTx.Transport().GetProto()), b.server.listenAddr, GenerateBranchID()),
+			"From":         fmt.Sprintf("%s;tag=%s", origReq.GetHeader("To"), fromTag),
+			"To":           fmt.Sprintf("%s;tag=%s", origReq.GetHeader("From"), toTag),
+			"Call-ID":      callID,
+			"CSeq":         fmt.Sprintf("%d BYE", cseq+10),
+			"Max-Forwards": "70",
+		},
+		Body: []byte{},
+	}
+	return byeReq
+}
+
 // cleanupは、サーバーのダイアログおよびトランザクションマップからB2BUAを削除します。
 func (b *B2BUA) cleanup() {
 	b.mu.Lock()

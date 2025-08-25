@@ -71,6 +71,7 @@ type ServerTransaction interface {
 	Respond(*SIPResponse) error
 	Requests() <-chan *SIPRequest
 	OriginalRequest() *SIPRequest
+	LastResponse() *SIPResponse
 }
 
 // ClientTransaction は、クライアント側のトランザクションを表します。
