@@ -2,6 +2,7 @@ package storage
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 
 	_ "github.com/glebarez/go-sqlite" // 純粋なGoのSQLiteドライバ
@@ -12,6 +13,12 @@ type User struct {
 	ID       int64
 	Username string
 	Password string // これはRFC 2617/2069に従ってHA1ハッシュを保存します
+}
+
+// GuidanceSetting は、単一のガイダンスURIとそれに対応する音声ファイルの間のマッピングを表します。
+type GuidanceSetting struct {
+	URI       string `json:"uri"`
+	AudioFile string `json:"audio_file"`
 }
 
 // Storage は、アプリケーションのデータベース操作を処理します。
@@ -160,4 +167,30 @@ func (s *Storage) SetSetting(key, value string) error {
 		return fmt.Errorf("could not execute statement for setting key %s: %w", key, err)
 	}
 	return nil
+}
+
+// GetGuidanceSettings は、JSONとして保存されているガイダンス設定を取得し、デコードします。
+func (s *Storage) GetGuidanceSettings() ([]GuidanceSetting, error) {
+	jsonStr, err := s.GetSetting("guidance_settings")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get guidance_settings from db: %w", err)
+	}
+	if jsonStr == "" {
+		return []GuidanceSetting{}, nil // 設定が存在しない場合は、空のスライスを返します
+	}
+
+	var settings []GuidanceSetting
+	if err := json.Unmarshal([]byte(jsonStr), &settings); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal guidance settings: %w", err)
+	}
+	return settings, nil
+}
+
+// SetGuidanceSettings は、ガイダンス設定をエンコードし、JSONとしてデータベースに保存します。
+func (s *Storage) SetGuidanceSettings(settings []GuidanceSetting) error {
+	data, err := json.Marshal(settings)
+	if err != nil {
+		return fmt.Errorf("failed to marshal guidance settings: %w", err)
+	}
+	return s.SetSetting("guidance_settings", string(data))
 }

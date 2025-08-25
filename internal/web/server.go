@@ -94,10 +94,14 @@ func (s *Server) handleGuidanceSettingsForm(w http.ResponseWriter, r *http.Reque
 		data = make(map[string]interface{})
 	}
 
-	// フォームに現在の値を事前入力します
-	users, audio := s.sipServer.GetGuidanceSettings()
-	data["GuidanceUser"] = strings.Join(users, ", ")
-	data["GuidanceAudio"] = audio
+	// データベースから現在の設定を取得します
+	settings, err := s.storage.GetGuidanceSettings()
+	if err != nil {
+		log.Printf("Error getting guidance settings: %v", err)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+	data["Settings"] = settings
 
 	tmpl := s.templates["guidance.html"]
 	if err := tmpl.Execute(w, data); err != nil {
@@ -113,50 +117,51 @@ func (s *Server) handleGuidanceSettingsSubmit(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	guidanceUserStr := r.FormValue("guidance_user")
-	guidanceAudio := r.FormValue("guidance_audio")
+	// フォームは 'guidance_uri' と 'guidance_audio' のスライスを送信します
+	uris := r.Form["guidance_uri"]
+	audioFiles := r.Form["guidance_audio"]
 
-	// カンマで分割し、空白をトリムして、空のエントリを削除します
-	var guidanceUsers []string
-	if guidanceUserStr != "" {
-		users := strings.Split(guidanceUserStr, ",")
-		for _, u := range users {
-			trimmed := strings.TrimSpace(u)
-			if trimmed != "" {
-				guidanceUsers = append(guidanceUsers, trimmed)
-			}
-		}
+	if len(uris) != len(audioFiles) {
+		http.Error(w, "Bad Request: URIと音声ファイルの数が一致しません。", http.StatusBadRequest)
+		return
 	}
 
-	if len(guidanceUsers) == 0 || guidanceAudio == "" {
+	var newSettings []storage.GuidanceSetting
+	sipServerSettings := make(map[string]string)
+
+	for i := 0; i < len(uris); i++ {
+		uri := strings.TrimSpace(uris[i])
+		audioFile := strings.TrimSpace(audioFiles[i])
+
+		if uri == "" || audioFile == "" {
+			// 空の行は無視します
+			continue
+		}
+		newSettings = append(newSettings, storage.GuidanceSetting{
+			URI:       uri,
+			AudioFile: audioFile,
+		})
+		sipServerSettings[uri] = audioFile
+	}
+
+	// 設定をDBに保存します
+	if err := s.storage.SetGuidanceSettings(newSettings); err != nil {
+		log.Printf("Error saving guidance settings: %v", err)
 		data := map[string]interface{}{
-			"Error": "少なくとも1つのSIPユーザーと音声ファイルパスが必要です。",
+			"Error":    "データベースへの設定の保存に失敗しました。",
+			"Settings": newSettings, // ユーザーの入力を保持します
 		}
 		s.handleGuidanceSettingsForm(w, r, data)
 		return
 	}
 
-	// DBに保存するために、クリーンアップされたスライスをカンマ区切りの文字列に戻します
-	dbUserStr := strings.Join(guidanceUsers, ",")
-
-	// 設定をDBに保存します
-	if err := s.storage.SetSetting("guidance_user", dbUserStr); err != nil {
-		log.Printf("Error saving guidance_user setting: %v", err)
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-		return
-	}
-	if err := s.storage.SetSetting("guidance_audio", guidanceAudio); err != nil {
-		log.Printf("Error saving guidance_audio setting: %v", err)
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-		return
-	}
-
 	// 実行中のSIPサーバーインスタンスを更新します
-	s.sipServer.UpdateGuidanceSettings(guidanceUsers, guidanceAudio)
+	s.sipServer.UpdateGuidanceSettings(sipServerSettings)
 
 	// 成功メッセージとともにフォームを再表示します
 	data := map[string]interface{}{
-		"Success": true,
+		"Success":  true,
+		"Settings": newSettings,
 	}
 	s.handleGuidanceSettingsForm(w, r, data)
 }

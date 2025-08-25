@@ -7,8 +7,13 @@
         body { font-family: sans-serif; margin: 2em; }
         nav { margin-bottom: 1em; }
         nav a { margin-right: 1em; }
+        table { border-collapse: collapse; width: 100%; margin-bottom: 1em; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+        th { background-color: #f2f2f2; }
         .success { color: green; }
         .error { color: red; }
+        .actions { text-align: center; }
+        .actions button { cursor: pointer; }
     </style>
 </head>
 <body>
@@ -27,18 +32,50 @@
     {{end}}
 
     <form method="post">
+        <table id="settings-table">
+            <thead>
+                <tr>
+                    <th>SIP URI (ユーザー名)</th>
+                    <th>音声ファイルパス</th>
+                    <th class="actions">操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                {{range .Settings}}
+                <tr>
+                    <td><input type="text" name="guidance_uri" value="{{.URI}}" required size="40"></td>
+                    <td><input type="text" name="guidance_audio" value="{{.AudioFile}}" required size="60"></td>
+                    <td class="actions"><button type="button" onclick="removeRow(this)">削除</button></td>
+                </tr>
+                {{end}}
+            </tbody>
+        </table>
+        <button type="button" onclick="addRow()">設定を追加</button>
         <p>
-            <label for="guidance_user">ガイダンスSIPユーザー:</label><br>
-            <textarea id="guidance_user" name="guidance_user" rows="4" cols="50" required>{{.GuidanceUser}}</textarea>
-            <br><small>複数のユーザーをカンマ区切りで入力します (例: user1, user2, user3)</small>
-        </p>
-        <p>
-            <label for="guidance_audio">ガイダンス音声ファイルパス:</label><br>
-            <input type="text" id="guidance_audio" name="guidance_audio" value="{{.GuidanceAudio}}" required>
-        </p>
-        <p>
-            <button type="submit">保存</button>
+            <button type="submit">すべての設定を保存</button>
         </p>
     </form>
+
+    <template id="row-template">
+        <tr>
+            <td><input type="text" name="guidance_uri" required size="40"></td>
+            <td><input type="text" name="guidance_audio" required size="60"></td>
+            <td class="actions"><button type="button" onclick="removeRow(this)">削除</button></td>
+        </tr>
+    </template>
+
+    <script>
+        function addRow() {
+            const tableBody = document.querySelector("#settings-table tbody");
+            const template = document.getElementById("row-template");
+            const clone = template.content.cloneNode(true);
+            tableBody.appendChild(clone);
+        }
+
+        function removeRow(button) {
+            const row = button.closest("tr");
+            row.remove();
+        }
+    </script>
 </body>
 </html>
